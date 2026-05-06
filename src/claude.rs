@@ -1,0 +1,350 @@
+use chrono::DateTime;
+use rayon::prelude::*;
+use serde::Deserialize;
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
+use std::time::Instant;
+use walkdir::WalkDir;
+
+use crate::colors::*;
+use crate::format::{format_float_with_commas, format_int_with_commas};
+use crate::viz::{print_cost_bar, print_token_bar, TokenStats};
+
+#[derive(Deserialize)]
+struct ClaudeUsage {
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    cache_creation_input_tokens: Option<i64>,
+    cache_read_input_tokens: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeAssistantMessage {
+    model: Option<String>,
+    usage: Option<ClaudeUsage>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeLogEntry {
+    #[serde(rename = "type")]
+    msg_type: Option<String>,
+    timestamp: Option<String>,
+    message: Option<ClaudeAssistantMessage>,
+}
+
+/// Per-1M-token pricing: (input, output, cache_create, cache_read).
+/// Source: 2026 rates as listed in the user's reference Python script.
+pub fn get_claude_pricing(model: &str) -> (f64, f64, f64, f64) {
+    let m = model.to_lowercase();
+    if m.contains("sonnet-4-6") || m.contains("sonnet-3-5") {
+        (3.00, 15.00, 3.75, 0.30)
+    } else if m.contains("opus-4-7") || m.contains("opus-3") {
+        (5.00, 25.00, 6.25, 0.50)
+    } else if m.contains("haiku-4-5") || m.contains("haiku-3-5") {
+        (1.00, 5.00, 1.25, 0.10)
+    } else {
+        (3.00, 15.00, 3.75, 0.30)
+    }
+}
+
+#[derive(Default)]
+pub struct ClaudeStats {
+    pub daily_stats: BTreeMap<String, TokenStats>,
+    pub daily_costs: BTreeMap<String, f64>,
+    pub monthly_stats: BTreeMap<String, TokenStats>,
+    pub monthly_costs: BTreeMap<String, f64>,
+    pub model_stats: HashMap<String, TokenStats>,
+    pub monthly_model_usage: BTreeMap<String, HashMap<String, TokenStats>>,
+    pub total_messages: usize,
+    pub sessions_found: usize,
+}
+
+fn merge_claude_stats(mut a: ClaudeStats, b: ClaudeStats) -> ClaudeStats {
+    a.total_messages += b.total_messages;
+    a.sessions_found += b.sessions_found;
+
+    for (k, v) in b.daily_stats {
+        a.daily_stats.entry(k).or_default().add(&v);
+    }
+    for (k, v) in b.daily_costs {
+        *a.daily_costs.entry(k).or_insert(0.0) += v;
+    }
+    for (k, v) in b.monthly_stats {
+        a.monthly_stats.entry(k).or_default().add(&v);
+    }
+    for (k, v) in b.monthly_costs {
+        *a.monthly_costs.entry(k).or_insert(0.0) += v;
+    }
+    for (model, v) in b.model_stats {
+        a.model_stats.entry(model).or_default().add(&v);
+    }
+    for (month, models) in b.monthly_model_usage {
+        let a_models = a.monthly_model_usage.entry(month).or_default();
+        for (model, v) in models {
+            a_models.entry(model).or_default().add(&v);
+        }
+    }
+    a
+}
+
+pub fn run_claude_report() -> Option<(ClaudeStats, f64)> {
+    let home = match dirs::home_dir() {
+        Some(p) => p,
+        None => {
+            println!("Error: Could not determine home directory.");
+            return None;
+        }
+    };
+    let target_path = home.join(".claude/projects");
+    if !target_path.is_dir() {
+        println!("{}Error: Could not find storage at {}{}", RED, target_path.display(), RESET);
+        return None;
+    }
+
+    let session_files: Vec<PathBuf> = WalkDir::new(&target_path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map_or(false, |ext| ext == "jsonl"))
+        .map(|e| e.path().to_path_buf())
+        .collect();
+
+    println!(
+        "{}Scanning {} Claude session files in:{}\n{}\n",
+        BOLD,
+        session_files.len(),
+        RESET,
+        target_path.display()
+    );
+
+    let start_time = Instant::now();
+
+    let global_stats = session_files
+        .par_iter()
+        .map(|file_path| {
+            let mut local = ClaudeStats::default();
+            let file = match fs::File::open(file_path) {
+                Ok(f) => f,
+                Err(_) => return local,
+            };
+            local.sessions_found = 1;
+
+            let reader = BufReader::new(file);
+            for line in reader.lines() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(_) => continue,
+                };
+                let entry = match serde_json::from_str::<ClaudeLogEntry>(&line) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                if entry.msg_type.as_deref() != Some("assistant") {
+                    continue;
+                }
+                let assistant_msg = match entry.message {
+                    Some(m) => m,
+                    None => continue,
+                };
+                let usage = match assistant_msg.usage {
+                    Some(u) => u,
+                    None => continue,
+                };
+                let model = assistant_msg.model.unwrap_or_else(|| "unknown".to_string());
+
+                let (date_str, month_str) = match entry.timestamp {
+                    Some(ts) => match DateTime::parse_from_rfc3339(&ts.replace('Z', "+00:00")) {
+                        Ok(dt) => (
+                            dt.format("%Y-%m-%d").to_string(),
+                            dt.format("%Y-%m").to_string(),
+                        ),
+                        Err(_) => ("Unknown".to_string(), "Unknown".to_string()),
+                    },
+                    None => ("Unknown".to_string(), "Unknown".to_string()),
+                };
+
+                let in_tokens = usage.input_tokens.unwrap_or(0);
+                let out_tokens = usage.output_tokens.unwrap_or(0);
+                let cache_create = usage.cache_creation_input_tokens.unwrap_or(0);
+                let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
+
+                if in_tokens + out_tokens + cache_create + cache_read == 0 {
+                    continue;
+                }
+
+                let (p_in, p_out, p_cc, p_cr) = get_claude_pricing(&model);
+                let turn_cost = (in_tokens as f64 / 1_000_000.0 * p_in)
+                    + (out_tokens as f64 / 1_000_000.0 * p_out)
+                    + (cache_create as f64 / 1_000_000.0 * p_cc)
+                    + (cache_read as f64 / 1_000_000.0 * p_cr);
+
+                let entry = TokenStats {
+                    in_tokens,
+                    out_tokens,
+                    cache_read_tokens: cache_read,
+                    cache_create_tokens: cache_create,
+                };
+
+                local.daily_stats.entry(date_str.clone()).or_default().add(&entry);
+                *local.daily_costs.entry(date_str).or_insert(0.0) += turn_cost;
+
+                local.monthly_stats.entry(month_str.clone()).or_default().add(&entry);
+                *local.monthly_costs.entry(month_str.clone()).or_insert(0.0) += turn_cost;
+
+                local.model_stats.entry(model.clone()).or_default().add(&entry);
+                local
+                    .monthly_model_usage
+                    .entry(month_str)
+                    .or_default()
+                    .entry(model)
+                    .or_default()
+                    .add(&entry);
+
+                local.total_messages += 1;
+            }
+            local
+        })
+        .reduce(ClaudeStats::default, merge_claude_stats);
+
+    let parsing_time = start_time.elapsed().as_secs_f64();
+    if global_stats.total_messages == 0 {
+        return None;
+    }
+    Some((global_stats, parsing_time))
+}
+
+pub fn print_claude_report(global_stats: &ClaudeStats, parsing_time: f64, daily_days: usize) {
+    println!("\n{}", "=".repeat(105));
+    println!("{}📊 CLAUDE CLI USAGE & COST ESTIMATE{}", HEADER, RESET);
+    println!("{}", "=".repeat(105));
+    println!("{}Sessions Scanned:{} {}", BOLD, RESET, global_stats.sessions_found);
+    println!(
+        "{}Total Messages:{}   {}",
+        BOLD,
+        RESET,
+        format_int_with_commas(global_stats.total_messages as i64)
+    );
+    println!("{}", "-".repeat(105));
+
+    if !global_stats.model_stats.is_empty() {
+        println!("\n{}=== TOKEN USAGE (STACKED) ==={}", HEADER, RESET);
+        println!(
+            "Legend: {}█ Input{} | {}█ Output{} | {}▒ Cache Read{} | {}░ Cache Create{}",
+            BLUE, RESET, GREEN, RESET, YELLOW, RESET, ORANGE, RESET
+        );
+
+        let max_model_len = global_stats
+            .model_stats
+            .keys()
+            .map(|m| m.len())
+            .max()
+            .unwrap_or(20)
+            .min(30);
+
+        println!("\n{}--- Overall Usage by Model ---{}", BOLD, RESET);
+        let all_max_tokens = global_stats.model_stats.values().map(|s| s.total()).max().unwrap_or(0);
+        let mut sorted_models: Vec<_> = global_stats.model_stats.iter().collect();
+        sorted_models.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
+        for (model, stats) in sorted_models {
+            print_token_bar(
+                &format!("{:<width$}", model.get(..30).unwrap_or(model), width = max_model_len),
+                stats,
+                all_max_tokens,
+                35,
+                true,
+            );
+        }
+
+        println!("\n{}--- Monthly Breakdown by Model ---{}", BOLD, RESET);
+        for (month, models) in global_stats.monthly_model_usage.iter().rev() {
+            if month == "Unknown" {
+                continue;
+            }
+            println!("\n{}{}{}", CYAN, month, RESET);
+            let month_max = models.values().map(|s| s.total()).max().unwrap_or(1);
+            let mut sorted_m: Vec<_> = models.iter().collect();
+            sorted_m.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
+            for (model, stats) in sorted_m {
+                print_token_bar(
+                    &format!("  {:<width$}", model.get(..30).unwrap_or(model), width = max_model_len),
+                    stats,
+                    month_max,
+                    35,
+                    true,
+                );
+            }
+        }
+    }
+
+    println!("\n{}=== FINANCIAL COSTS ==={}", HEADER, RESET);
+
+    if !global_stats.monthly_costs.is_empty() {
+        println!("\n{}--- Monthly Costs ---{}", BOLD, RESET);
+        let max_month_cost = global_stats.monthly_costs.values().copied().fold(0.0_f64, |a, b| a.max(b));
+        for (month, cost) in global_stats.monthly_costs.iter().rev() {
+            if month == "Unknown" {
+                continue;
+            }
+            print_cost_bar(&format!("{:^12}", month), *cost, max_month_cost, 35);
+        }
+    }
+
+    if !global_stats.daily_costs.is_empty() {
+        println!("\n{}--- Daily Costs (Last {} days) ---{}", BOLD, daily_days, RESET);
+        let max_day_cost = global_stats.daily_costs.values().copied().fold(0.0_f64, |a, b| a.max(b));
+        let mut sorted_days: Vec<_> = global_stats.daily_costs.iter().collect();
+        sorted_days.sort_by(|a, b| a.0.cmp(b.0));
+        for (day, cost) in sorted_days.into_iter().rev().take(daily_days) {
+            if day == "Unknown" {
+                continue;
+            }
+            print_cost_bar(&format!("{:<12}", day), *cost, max_day_cost, 35);
+        }
+    }
+
+    let total_cost: f64 = global_stats.monthly_costs.values().sum();
+    let mut total_tokens = TokenStats::default();
+    for s in global_stats.model_stats.values() {
+        total_tokens.add(s);
+    }
+
+    println!("\n{}", "=".repeat(50));
+    println!("{}GRAND TOTALS (CLAUDE CLI){}", HEADER, RESET);
+    println!("{}", "-".repeat(50));
+    println!("{}Tokens:{}", BOLD, RESET);
+    println!("  {}Input:        {:>12}{}", BLUE, format_int_with_commas(total_tokens.in_tokens), RESET);
+    println!("  {}Output:       {:>12}{}", GREEN, format_int_with_commas(total_tokens.out_tokens), RESET);
+    println!("  {}Cache Read:   {:>12}{}", YELLOW, format_int_with_commas(total_tokens.cache_read_tokens), RESET);
+    println!("  {}Cache Create: {:>12}{}", ORANGE, format_int_with_commas(total_tokens.cache_create_tokens), RESET);
+    println!("  {}Total:        {:>12}{}", BOLD, format_int_with_commas(total_tokens.total()), RESET);
+    println!("{}", "-".repeat(50));
+    println!("{}Cost:{}", BOLD, RESET);
+    println!("  {}${}{}", RED, format_float_with_commas(total_cost), RESET);
+    println!("{}", "-".repeat(50));
+    println!("{}Performance:{}", BOLD, RESET);
+    println!("  Sessions Parsed: {}", global_stats.sessions_found);
+    println!("  Parse Time:      {:.2} seconds", parsing_time);
+    println!("{}", "=".repeat(50));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_claude_pricing() {
+        let (i, o, cc, cr) = get_claude_pricing("claude-sonnet-4-6-20251001");
+        assert_eq!((i, o, cc, cr), (3.00, 15.00, 3.75, 0.30));
+
+        let (i, o, cc, cr) = get_claude_pricing("claude-opus-4-7");
+        assert_eq!((i, o, cc, cr), (5.00, 25.00, 6.25, 0.50));
+
+        let (i, o, cc, cr) = get_claude_pricing("claude-haiku-4-5-20251001");
+        assert_eq!((i, o, cc, cr), (1.00, 5.00, 1.25, 0.10));
+
+        // fallback
+        let (i, o, cc, cr) = get_claude_pricing("some-unknown-model");
+        assert_eq!((i, o, cc, cr), (3.00, 15.00, 3.75, 0.30));
+    }
+}
