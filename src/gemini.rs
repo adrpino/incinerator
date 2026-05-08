@@ -34,7 +34,7 @@ struct GeminiSession {
     messages: Option<Vec<GeminiMessage>>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct GeminiStats {
     pub daily_stats: BTreeMap<String, TokenStats>,
     pub daily_costs: BTreeMap<String, f64>,
@@ -114,136 +114,140 @@ fn merge_gemini_stats(mut a: GeminiStats, b: GeminiStats) -> GeminiStats {
     a
 }
 
-pub fn run_gemini_report() -> Option<(GeminiStats, f64)> {
-    let home = match dirs::home_dir() {
-        Some(p) => p,
-        None => {
-            println!("Error: Could not determine home directory.");
-            return None;
+pub fn get_gemini_storage_path() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    Some(home.join(".gemini/tmp"))
+}
+
+pub fn parse_gemini_file(file_path: &std::path::Path) -> GeminiStats {
+    let mut local = GeminiStats::default();
+    let mut messages = Vec::new();
+
+    if file_path.to_string_lossy().ends_with(".jsonl") {
+        if let Ok(file) = fs::File::open(file_path) {
+            let reader = BufReader::new(file);
+            for line in reader.lines() {
+                if let Ok(l) = line {
+                    if let Ok(msg) = serde_json::from_str::<GeminiMessage>(&l) {
+                        if msg.msg_type.is_some() && msg.timestamp.is_some() {
+                            messages.push(msg);
+                        }
+                    }
+                }
+            }
         }
-    };
-    let target_path = home.join(".gemini/tmp");
-    if !target_path.exists() {
-        println!("{}Error: Could not find storage at {}{}", RED, target_path.display(), RESET);
-        return None;
+    } else if let Ok(file) = fs::File::open(file_path) {
+        let reader = BufReader::new(file);
+        if let Ok(session) = serde_json::from_reader::<_, GeminiSession>(reader) {
+            if let Some(msgs) = session.messages {
+                messages = msgs;
+            }
+        }
     }
 
-    let session_files: Vec<PathBuf> = WalkDir::new(&target_path)
+    if messages.is_empty() {
+        return local;
+    }
+    local.sessions_found = 1;
+
+    let mut session_model = "unknown".to_string();
+    for m in &messages {
+        if let Some(mod_id) = &m.model {
+            session_model = mod_id.clone();
+            break;
+        }
+    }
+
+    for msg in messages {
+        let msg_type = msg.msg_type.as_deref().unwrap_or("unknown");
+        let msg_model = msg.model.clone().unwrap_or_else(|| session_model.clone());
+
+        let (date_str, month_str) = if let Some(ts_str) = &msg.timestamp {
+            if let Ok(dt) = DateTime::parse_from_rfc3339(&ts_str.replace('Z', "+00:00")) {
+                (dt.format("%Y-%m-%d").to_string(), dt.format("%Y-%m").to_string())
+            } else {
+                ("Unknown".to_string(), "Unknown".to_string())
+            }
+        } else {
+            ("Unknown".to_string(), "Unknown".to_string())
+        };
+
+        let mut in_tokens = 0;
+        let mut out_tokens = 0;
+        let mut cache_tokens = 0;
+
+        if let Some(t) = msg.tokens {
+            in_tokens = t.input.unwrap_or(0);
+            out_tokens = t.output.unwrap_or(0);
+            cache_tokens = t.cached.unwrap_or(0);
+        }
+
+        if in_tokens == 0 && out_tokens == 0 && cache_tokens == 0 {
+            let est = estimate_tokens(&msg.content);
+            if msg_type == "user" {
+                in_tokens = est;
+            } else if msg_type == "gemini" || msg_type == "model" {
+                out_tokens = est;
+            }
+        }
+
+        let total_context = in_tokens + cache_tokens;
+        let (price_in, price_out, price_cache) = get_gemini_pricing(&msg_model, total_context);
+        let turn_cost = (in_tokens as f64 / 1_000_000.0 * price_in)
+            + (out_tokens as f64 / 1_000_000.0 * price_out)
+            + (cache_tokens as f64 / 1_000_000.0 * price_cache);
+
+        let entry = TokenStats {
+            in_tokens,
+            out_tokens,
+            cache_read_tokens: cache_tokens,
+            cache_create_tokens: 0,
+        };
+
+        local.daily_stats.entry(date_str.clone()).or_default().add(&entry);
+        *local.daily_costs.entry(date_str).or_insert(0.0) += turn_cost;
+
+        local.monthly_stats.entry(month_str.clone()).or_default().add(&entry);
+        *local.monthly_costs.entry(month_str.clone()).or_insert(0.0) += turn_cost;
+
+        local.model_stats.entry(msg_model.clone()).or_default().add(&entry);
+        local
+            .monthly_model_usage
+            .entry(month_str)
+            .or_default()
+            .entry(msg_model)
+            .or_default()
+            .add(&entry);
+
+        local.total_messages += 1;
+    }
+    local
+}
+
+pub fn get_gemini_files() -> Vec<PathBuf> {
+    let target_path = match get_gemini_storage_path() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    if !target_path.exists() {
+        return Vec::new();
+    }
+    WalkDir::new(&target_path)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_name().to_string_lossy().starts_with("session-") && e.file_name().to_string_lossy().contains(".json"))
         .map(|e| e.path().to_path_buf())
-        .collect();
+        .collect()
+}
 
-    println!("{}Scanning Gemini session files in:{}\n{}\n", BOLD, RESET, target_path.display());
-
+pub fn run_gemini_report() -> Option<(GeminiStats, f64)> {
     let start_time = Instant::now();
+    let session_files = get_gemini_files();
+    if session_files.is_empty() { return None; }
 
     let global_stats = session_files
         .par_iter()
-        .map(|file_path| {
-            let mut local = GeminiStats::default();
-            let mut messages = Vec::new();
-
-            if file_path.to_string_lossy().ends_with(".jsonl") {
-                if let Ok(file) = fs::File::open(file_path) {
-                    let reader = BufReader::new(file);
-                    for line in reader.lines() {
-                        if let Ok(l) = line {
-                            if let Ok(msg) = serde_json::from_str::<GeminiMessage>(&l) {
-                                if msg.msg_type.is_some() && msg.timestamp.is_some() {
-                                    messages.push(msg);
-                                }
-                            }
-                        }
-                    }
-                }
-            } else if let Ok(content) = fs::read(file_path) {
-                if let Ok(session) = serde_json::from_slice::<GeminiSession>(&content) {
-                    if let Some(msgs) = session.messages {
-                        messages = msgs;
-                    }
-                }
-            }
-
-            if messages.is_empty() {
-                return local;
-            }
-            local.sessions_found = 1;
-
-            let mut session_model = "unknown".to_string();
-            for m in &messages {
-                if let Some(mod_id) = &m.model {
-                    session_model = mod_id.clone();
-                    break;
-                }
-            }
-
-            for msg in messages {
-                let msg_type = msg.msg_type.as_deref().unwrap_or("unknown");
-                let msg_model = msg.model.clone().unwrap_or_else(|| session_model.clone());
-
-                let (date_str, month_str) = if let Some(ts_str) = &msg.timestamp {
-                    if let Ok(dt) = DateTime::parse_from_rfc3339(&ts_str.replace('Z', "+00:00")) {
-                        (dt.format("%Y-%m-%d").to_string(), dt.format("%Y-%m").to_string())
-                    } else {
-                        ("Unknown".to_string(), "Unknown".to_string())
-                    }
-                } else {
-                    ("Unknown".to_string(), "Unknown".to_string())
-                };
-
-                let mut in_tokens = 0;
-                let mut out_tokens = 0;
-                let mut cache_tokens = 0;
-
-                if let Some(t) = msg.tokens {
-                    in_tokens = t.input.unwrap_or(0);
-                    out_tokens = t.output.unwrap_or(0);
-                    cache_tokens = t.cached.unwrap_or(0);
-                }
-
-                if in_tokens == 0 && out_tokens == 0 && cache_tokens == 0 {
-                    let est = estimate_tokens(&msg.content);
-                    if msg_type == "user" {
-                        in_tokens = est;
-                    } else if msg_type == "gemini" || msg_type == "model" {
-                        out_tokens = est;
-                    }
-                }
-
-                let total_context = in_tokens + cache_tokens;
-                let (price_in, price_out, price_cache) = get_gemini_pricing(&msg_model, total_context);
-                let turn_cost = (in_tokens as f64 / 1_000_000.0 * price_in)
-                    + (out_tokens as f64 / 1_000_000.0 * price_out)
-                    + (cache_tokens as f64 / 1_000_000.0 * price_cache);
-
-                let entry = TokenStats {
-                    in_tokens,
-                    out_tokens,
-                    cache_read_tokens: cache_tokens,
-                    cache_create_tokens: 0,
-                };
-
-                local.daily_stats.entry(date_str.clone()).or_default().add(&entry);
-                *local.daily_costs.entry(date_str).or_insert(0.0) += turn_cost;
-
-                local.monthly_stats.entry(month_str.clone()).or_default().add(&entry);
-                *local.monthly_costs.entry(month_str.clone()).or_insert(0.0) += turn_cost;
-
-                local.model_stats.entry(msg_model.clone()).or_default().add(&entry);
-                local
-                    .monthly_model_usage
-                    .entry(month_str)
-                    .or_default()
-                    .entry(msg_model)
-                    .or_default()
-                    .add(&entry);
-
-                local.total_messages += 1;
-            }
-            local
-        })
+        .map(|file_path| parse_gemini_file(file_path))
         .reduce(GeminiStats::default, merge_gemini_stats);
 
     let parsing_time = start_time.elapsed().as_secs_f64();

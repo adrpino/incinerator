@@ -3,6 +3,7 @@ mod cline;
 mod colors;
 mod format;
 mod gemini;
+mod tui;
 mod unified;
 mod viz;
 
@@ -21,6 +22,10 @@ struct Cli {
     /// Number of days to show in the daily costs chart (default: 14)
     #[arg(long)]
     daily: Option<usize>,
+
+    /// Launch interactive TUI
+    #[arg(long, short)]
+    tui: bool,
 }
 
 #[derive(Subcommand)]
@@ -49,11 +54,18 @@ enum Commands {
         #[arg(long)]
         daily: Option<usize>,
     },
+    /// Launch interactive TUI (default when no command given)
+    Tui,
 }
 
 fn main() {
     let cli = Cli::parse();
     let default_daily = cli.daily.unwrap_or(14);
+
+    if cli.tui {
+        launch_tui();
+        return;
+    }
 
     match cli.command {
         Some(Commands::Cline { exclude_claude, exclude_gemini, daily }) => {
@@ -74,8 +86,21 @@ fn main() {
                 gemini::print_gemini_report(&stats, time, days);
             }
         }
-        None => {
-            unified::run_unified_report(default_daily);
+        Some(Commands::Tui) => {
+            launch_tui();
         }
+        None => {
+            launch_tui();
+        }
+    }
+}
+
+fn launch_tui() {
+    if let Some(stats) = unified::UnifiedStats::collect() {
+        if let Err(e) = tui::run_tui(stats) {
+            eprintln!("Error running TUI: {}", e);
+        }
+    } else {
+        println!("No usage data found from any source.");
     }
 }

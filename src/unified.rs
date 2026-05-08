@@ -5,22 +5,63 @@ use crate::cline::{run_cline_report, ClineStats};
 use crate::colors::*;
 use crate::format::{format_float_with_commas, format_int_with_commas};
 use crate::gemini::{run_gemini_report, GeminiStats};
-use crate::viz::{print_cost_bar, print_token_bar, TokenStats};
+use crate::viz::{TokenStats};
 
-#[derive(Default)]
-struct UnifiedStats {
-    daily_costs: BTreeMap<String, f64>,
-    monthly_costs: BTreeMap<String, f64>,
-    monthly_tokens: BTreeMap<String, TokenStats>,
-    model_stats: HashMap<String, TokenStats>,
-    total_tokens: TokenStats,
-    total_cost: f64,
-    parse_time: f64,
-    files_parsed: u32,
-    show_cache_create: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Provider {
+    Cline,
+    ClaudeCode,
+    GeminiCLI,
+}
+
+impl std::fmt::Display for Provider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Provider::Cline => write!(f, "Cline"),
+            Provider::ClaudeCode => write!(f, "Claude Code"),
+            Provider::GeminiCLI => write!(f, "Gemini CLI"),
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct UnifiedStats {
+    pub daily_costs: BTreeMap<String, f64>,
+    pub daily_tokens: BTreeMap<String, TokenStats>,
+    pub monthly_costs: BTreeMap<String, f64>,
+    pub monthly_tokens: BTreeMap<String, TokenStats>,
+    pub model_stats: HashMap<String, TokenStats>,
+    pub provider_costs: HashMap<Provider, f64>,
+    pub total_tokens: TokenStats,
+    pub total_cost: f64,
+    pub parse_time: f64,
+    pub files_parsed: u32,
+    pub show_cache_create: bool,
 }
 
 impl UnifiedStats {
+    pub fn collect() -> Option<Self> {
+        let cline_res = run_cline_report(false, false);
+        let gemini_res = run_gemini_report();
+        let claude_res = run_claude_report();
+
+        if cline_res.is_none() && gemini_res.is_none() && claude_res.is_none() {
+            return None;
+        }
+
+        let mut unified = UnifiedStats::default();
+        if let Some((s, t)) = cline_res {
+            unified.add_cline(s, t);
+        }
+        if let Some((s, t)) = gemini_res {
+            unified.add_gemini(s, t);
+        }
+        if let Some((s, t)) = claude_res {
+            unified.add_claude(s, t);
+        }
+        Some(unified)
+    }
+
     fn merge_costs(&mut self, daily: &BTreeMap<String, f64>, monthly: &BTreeMap<String, f64>) {
         for (k, v) in daily {
             *self.daily_costs.entry(k.clone()).or_insert(0.0) += v;
@@ -36,14 +77,22 @@ impl UnifiedStats {
         }
     }
 
+    fn merge_daily_tokens(&mut self, daily: &BTreeMap<String, TokenStats>) {
+        for (k, v) in daily {
+            self.daily_tokens.entry(k.clone()).or_default().add(v);
+        }
+    }
+
     fn merge_model_stats(&mut self, models: impl IntoIterator<Item = (String, TokenStats)>) {
         for (model, v) in models {
             self.model_stats.entry(model).or_default().add(&v);
         }
     }
 
-    fn add_cline(&mut self, s: ClineStats, parse_time: f64) {
+    pub fn add_cline(&mut self, s: ClineStats, parse_time: f64) {
         self.merge_costs(&s.daily_costs, &s.monthly_costs);
+        self.merge_daily_tokens(&s.daily_tokens);
+        *self.provider_costs.entry(Provider::Cline).or_insert(0.0) += s.total_cost;
         self.merge_monthly_tokens(&s.monthly_tokens);
         let flat_models: Vec<(String, TokenStats)> = s
             .monthly_model_tokens
@@ -57,8 +106,11 @@ impl UnifiedStats {
         self.files_parsed += s.files_found;
     }
 
-    fn add_gemini(&mut self, s: GeminiStats, parse_time: f64) {
+    pub fn add_gemini(&mut self, s: GeminiStats, parse_time: f64) {
         self.merge_costs(&s.daily_costs, &s.monthly_costs);
+        self.merge_daily_tokens(&s.daily_stats);
+        let cost = s.monthly_costs.values().sum::<f64>();
+        *self.provider_costs.entry(Provider::GeminiCLI).or_insert(0.0) += cost;
         self.merge_monthly_tokens(&s.monthly_stats);
         self.merge_model_stats(s.model_stats.clone());
         let mut total = TokenStats::default();
@@ -66,13 +118,16 @@ impl UnifiedStats {
             total.add(v);
         }
         self.total_tokens.add(&total);
-        self.total_cost += s.monthly_costs.values().sum::<f64>();
+        self.total_cost += cost;
         self.parse_time += parse_time;
         self.files_parsed += s.sessions_found as u32;
     }
 
-    fn add_claude(&mut self, s: ClaudeStats, parse_time: f64) {
+    pub fn add_claude(&mut self, s: ClaudeStats, parse_time: f64) {
         self.merge_costs(&s.daily_costs, &s.monthly_costs);
+        self.merge_daily_tokens(&s.daily_stats);
+        let cost = s.monthly_costs.values().sum::<f64>();
+        *self.provider_costs.entry(Provider::ClaudeCode).or_insert(0.0) += cost;
         self.merge_monthly_tokens(&s.monthly_stats);
         self.merge_model_stats(s.model_stats.clone());
         let mut total = TokenStats::default();
@@ -80,7 +135,7 @@ impl UnifiedStats {
             total.add(v);
         }
         self.total_tokens.add(&total);
-        self.total_cost += s.monthly_costs.values().sum::<f64>();
+        self.total_cost += cost;
         self.parse_time += parse_time;
         self.files_parsed += s.sessions_found as u32;
         if total.cache_create_tokens > 0 {
@@ -89,26 +144,12 @@ impl UnifiedStats {
     }
 }
 
+#[allow(dead_code)]
 pub fn run_unified_report(daily_days: usize) {
-    let cline_res = run_cline_report(false, false);
-    let gemini_res = run_gemini_report();
-    let claude_res = run_claude_report();
-
-    if cline_res.is_none() && gemini_res.is_none() && claude_res.is_none() {
+    let Some(unified) = UnifiedStats::collect() else {
         println!("No usage data found from any source.");
         return;
-    }
-
-    let mut unified = UnifiedStats::default();
-    if let Some((s, t)) = cline_res {
-        unified.add_cline(s, t);
-    }
-    if let Some((s, t)) = gemini_res {
-        unified.add_gemini(s, t);
-    }
-    if let Some((s, t)) = claude_res {
-        unified.add_claude(s, t);
-    }
+    };
 
     println!("\n{}", "=".repeat(95));
     println!("{}🔥 INCINERATOR: AI USAGE & COST ESTIMATE{}", HEADER, RESET);
@@ -130,7 +171,8 @@ pub fn run_unified_report(daily_days: usize) {
     println!("\n{}--- Monthly Token Usage ---{}", BOLD, RESET);
     let max_monthly = unified.monthly_tokens.values().map(|s| s.total()).max().unwrap_or(0);
     for (month, stats) in &unified.monthly_tokens {
-        print_token_bar(&format!("{:^10}", month), stats, max_monthly, 35, unified.show_cache_create);
+        // Note: print_token_bar is in viz.rs
+        crate::viz::print_token_bar(&format!("{:^10}", month), stats, max_monthly, 35, unified.show_cache_create);
     }
 
     if !unified.model_stats.is_empty() {
@@ -140,7 +182,7 @@ pub fn run_unified_report(daily_days: usize) {
         let mut sorted_models: Vec<_> = unified.model_stats.iter().collect();
         sorted_models.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
         for (model, stats) in sorted_models {
-            print_token_bar(
+            crate::viz::print_token_bar(
                 &format!("{:<width$}", model.get(..30).unwrap_or(model), width = max_model_len),
                 stats,
                 max_model_tokens,
@@ -159,7 +201,7 @@ pub fn run_unified_report(daily_days: usize) {
             if month == "Unknown" {
                 continue;
             }
-            print_cost_bar(&format!("{:^12}", month), *cost, max_month_cost, 35);
+            crate::viz::print_cost_bar(&format!("{:^12}", month), *cost, max_month_cost, 35);
         }
     }
 
@@ -172,7 +214,7 @@ pub fn run_unified_report(daily_days: usize) {
             if day == "Unknown" {
                 continue;
             }
-            print_cost_bar(&format!("{:<12}", day), *cost, max_day_cost, 35);
+            crate::viz::print_cost_bar(&format!("{:<12}", day), *cost, max_day_cost, 35);
         }
     }
 

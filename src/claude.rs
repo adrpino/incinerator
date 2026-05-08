@@ -49,7 +49,7 @@ pub fn get_claude_pricing(model: &str) -> (f64, f64, f64, f64) {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ClaudeStats {
     pub daily_stats: BTreeMap<String, TokenStats>,
     pub daily_costs: BTreeMap<String, f64>,
@@ -89,122 +89,119 @@ fn merge_claude_stats(mut a: ClaudeStats, b: ClaudeStats) -> ClaudeStats {
     a
 }
 
-pub fn run_claude_report() -> Option<(ClaudeStats, f64)> {
-    let home = match dirs::home_dir() {
-        Some(p) => p,
-        None => {
-            println!("Error: Could not determine home directory.");
-            return None;
-        }
-    };
-    let target_path = home.join(".claude/projects");
-    if !target_path.is_dir() {
-        println!("{}Error: Could not find storage at {}{}", RED, target_path.display(), RESET);
-        return None;
-    }
+pub fn get_claude_storage_path() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    Some(home.join(".claude/projects"))
+}
 
-    let session_files: Vec<PathBuf> = WalkDir::new(&target_path)
+pub fn parse_claude_file(file_path: &std::path::Path) -> ClaudeStats {
+    let mut local = ClaudeStats::default();
+    let file = match fs::File::open(file_path) {
+        Ok(f) => f,
+        Err(_) => return local,
+    };
+    local.sessions_found = 1;
+
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let entry = match serde_json::from_str::<ClaudeLogEntry>(&line) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if entry.msg_type.as_deref() != Some("assistant") {
+            continue;
+        }
+        let assistant_msg = match entry.message {
+            Some(m) => m,
+            None => continue,
+        };
+        let usage = match assistant_msg.usage {
+            Some(u) => u,
+            None => continue,
+        };
+        let model = assistant_msg.model.unwrap_or_else(|| "unknown".to_string());
+
+        let (date_str, month_str) = match entry.timestamp {
+            Some(ts) => match DateTime::parse_from_rfc3339(&ts.replace('Z', "+00:00")) {
+                Ok(dt) => (
+                    dt.format("%Y-%m-%d").to_string(),
+                    dt.format("%Y-%m").to_string(),
+                ),
+                Err(_) => ("Unknown".to_string(), "Unknown".to_string()),
+            },
+            None => ("Unknown".to_string(), "Unknown".to_string()),
+        };
+
+        let in_tokens = usage.input_tokens.unwrap_or(0);
+        let out_tokens = usage.output_tokens.unwrap_or(0);
+        let cache_create = usage.cache_creation_input_tokens.unwrap_or(0);
+        let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
+
+        if in_tokens + out_tokens + cache_create + cache_read == 0 {
+            continue;
+        }
+
+        let (p_in, p_out, p_cc, p_cr) = get_claude_pricing(&model);
+        let turn_cost = (in_tokens as f64 / 1_000_000.0 * p_in)
+            + (out_tokens as f64 / 1_000_000.0 * p_out)
+            + (cache_create as f64 / 1_000_000.0 * p_cc)
+            + (cache_read as f64 / 1_000_000.0 * p_cr);
+
+        let entry = TokenStats {
+            in_tokens,
+            out_tokens,
+            cache_read_tokens: cache_read,
+            cache_create_tokens: cache_create,
+        };
+
+        local.daily_stats.entry(date_str.clone()).or_default().add(&entry);
+        *local.daily_costs.entry(date_str).or_insert(0.0) += turn_cost;
+
+        local.monthly_stats.entry(month_str.clone()).or_default().add(&entry);
+        *local.monthly_costs.entry(month_str.clone()).or_insert(0.0) += turn_cost;
+
+        local.model_stats.entry(model.clone()).or_default().add(&entry);
+        local
+            .monthly_model_usage
+            .entry(month_str)
+            .or_default()
+            .entry(model)
+            .or_default()
+            .add(&entry);
+
+        local.total_messages += 1;
+    }
+    local
+}
+
+pub fn get_claude_files() -> Vec<PathBuf> {
+    let target_path = match get_claude_storage_path() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    if !target_path.is_dir() {
+        return Vec::new();
+    }
+    WalkDir::new(&target_path)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map_or(false, |ext| ext == "jsonl"))
         .map(|e| e.path().to_path_buf())
-        .collect();
+        .collect()
+}
 
-    println!(
-        "{}Scanning {} Claude session files in:{}\n{}\n",
-        BOLD,
-        session_files.len(),
-        RESET,
-        target_path.display()
-    );
-
+pub fn run_claude_report() -> Option<(ClaudeStats, f64)> {
     let start_time = Instant::now();
+    let session_files = get_claude_files();
+    if session_files.is_empty() { return None; }
 
     let global_stats = session_files
         .par_iter()
-        .map(|file_path| {
-            let mut local = ClaudeStats::default();
-            let file = match fs::File::open(file_path) {
-                Ok(f) => f,
-                Err(_) => return local,
-            };
-            local.sessions_found = 1;
-
-            let reader = BufReader::new(file);
-            for line in reader.lines() {
-                let line = match line {
-                    Ok(l) => l,
-                    Err(_) => continue,
-                };
-                let entry = match serde_json::from_str::<ClaudeLogEntry>(&line) {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-                if entry.msg_type.as_deref() != Some("assistant") {
-                    continue;
-                }
-                let assistant_msg = match entry.message {
-                    Some(m) => m,
-                    None => continue,
-                };
-                let usage = match assistant_msg.usage {
-                    Some(u) => u,
-                    None => continue,
-                };
-                let model = assistant_msg.model.unwrap_or_else(|| "unknown".to_string());
-
-                let (date_str, month_str) = match entry.timestamp {
-                    Some(ts) => match DateTime::parse_from_rfc3339(&ts.replace('Z', "+00:00")) {
-                        Ok(dt) => (
-                            dt.format("%Y-%m-%d").to_string(),
-                            dt.format("%Y-%m").to_string(),
-                        ),
-                        Err(_) => ("Unknown".to_string(), "Unknown".to_string()),
-                    },
-                    None => ("Unknown".to_string(), "Unknown".to_string()),
-                };
-
-                let in_tokens = usage.input_tokens.unwrap_or(0);
-                let out_tokens = usage.output_tokens.unwrap_or(0);
-                let cache_create = usage.cache_creation_input_tokens.unwrap_or(0);
-                let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
-
-                if in_tokens + out_tokens + cache_create + cache_read == 0 {
-                    continue;
-                }
-
-                let (p_in, p_out, p_cc, p_cr) = get_claude_pricing(&model);
-                let turn_cost = (in_tokens as f64 / 1_000_000.0 * p_in)
-                    + (out_tokens as f64 / 1_000_000.0 * p_out)
-                    + (cache_create as f64 / 1_000_000.0 * p_cc)
-                    + (cache_read as f64 / 1_000_000.0 * p_cr);
-
-                let entry = TokenStats {
-                    in_tokens,
-                    out_tokens,
-                    cache_read_tokens: cache_read,
-                    cache_create_tokens: cache_create,
-                };
-
-                local.daily_stats.entry(date_str.clone()).or_default().add(&entry);
-                *local.daily_costs.entry(date_str).or_insert(0.0) += turn_cost;
-
-                local.monthly_stats.entry(month_str.clone()).or_default().add(&entry);
-                *local.monthly_costs.entry(month_str.clone()).or_insert(0.0) += turn_cost;
-
-                local.model_stats.entry(model.clone()).or_default().add(&entry);
-                local
-                    .monthly_model_usage
-                    .entry(month_str)
-                    .or_default()
-                    .entry(model)
-                    .or_default()
-                    .add(&entry);
-
-                local.total_messages += 1;
-            }
-            local
-        })
+        .map(|file_path| parse_claude_file(file_path))
         .reduce(ClaudeStats::default, merge_claude_stats);
 
     let parsing_time = start_time.elapsed().as_secs_f64();
