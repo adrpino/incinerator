@@ -191,24 +191,24 @@ pub fn run_unified_report(daily_days: usize) {
     println!("\n{}", "=".repeat(95));
     println!(
         "{}🔥 INCINERATOR: AI USAGE & COST ESTIMATE{}",
-        HEADER, RESET
+        TERM_HEADER, TERM_RESET
     );
     println!("{}", "=".repeat(95));
 
-    println!("\n{}=== TOKEN USAGE (STACKED) ==={}", HEADER, RESET);
+    println!("\n{}=== TOKEN USAGE (STACKED) ==={}", TERM_HEADER, TERM_RESET);
     if unified.show_cache_create {
         println!(
             "Legend: {}█ Input{} | {}█ Output{} | {}▒ Cache Read{} | {}░ Cache Create{}",
-            BLUE, RESET, GREEN, RESET, YELLOW, RESET, ORANGE, RESET
+            TERM_BLUE, TERM_RESET, TERM_GREEN, TERM_RESET, TERM_YELLOW, TERM_RESET, TERM_ORANGE, TERM_RESET
         );
     } else {
         println!(
             "Legend: {}█ Input{} | {}█ Output{} | {}▒ Cache Read{}",
-            BLUE, RESET, GREEN, RESET, YELLOW, RESET
+            TERM_BLUE, TERM_RESET, TERM_GREEN, TERM_RESET, TERM_YELLOW, TERM_RESET
         );
     }
 
-    println!("\n{}--- Monthly Token Usage ---{}", BOLD, RESET);
+    println!("\n{}--- Monthly Token Usage ---{}", TERM_BOLD, TERM_RESET);
     let max_monthly = unified
         .monthly_tokens
         .values()
@@ -227,7 +227,7 @@ pub fn run_unified_report(daily_days: usize) {
     }
 
     if !unified.model_stats.is_empty() {
-        println!("\n{}--- Overall Usage by Model ---{}", BOLD, RESET);
+        println!("\n{}--- Overall Usage by Model ---{}", TERM_BOLD, TERM_RESET);
         let max_model_tokens = unified
             .model_stats
             .values()
@@ -258,10 +258,10 @@ pub fn run_unified_report(daily_days: usize) {
         }
     }
 
-    println!("\n{}=== FINANCIAL COSTS ==={}", HEADER, RESET);
+    println!("\n{}=== FINANCIAL COSTS ==={}", TERM_HEADER, TERM_RESET);
 
     if !unified.monthly_costs.is_empty() {
-        println!("\n{}--- Monthly Costs ---{}", BOLD, RESET);
+        println!("\n{}--- Monthly Costs ---{}", TERM_BOLD, TERM_RESET);
         let max_month_cost = unified
             .monthly_costs
             .values()
@@ -278,7 +278,7 @@ pub fn run_unified_report(daily_days: usize) {
     if !unified.daily_costs.is_empty() {
         println!(
             "\n{}--- Daily Costs (Last {} days) ---{}",
-            BOLD, daily_days, RESET
+            TERM_BOLD, daily_days, TERM_RESET
         );
         let max_day_cost = unified
             .daily_costs
@@ -296,51 +296,51 @@ pub fn run_unified_report(daily_days: usize) {
     }
 
     println!("\n{}", "=".repeat(50));
-    println!("{}GRAND TOTALS (UNIFIED){}", HEADER, RESET);
+    println!("{}GRAND TOTALS (UNIFIED){}", TERM_HEADER, TERM_RESET);
     println!("{}", "-".repeat(50));
-    println!("{}Tokens:{}", BOLD, RESET);
+    println!("{}Tokens:{}", TERM_BOLD, TERM_RESET);
     println!(
         "  {}Input:        {:>12}{}",
-        BLUE,
+        TERM_BLUE,
         format_int_with_commas(unified.total_tokens.in_tokens),
-        RESET
+        TERM_RESET
     );
     println!(
         "  {}Output:       {:>12}{}",
-        GREEN,
+        TERM_GREEN,
         format_int_with_commas(unified.total_tokens.out_tokens),
-        RESET
+        TERM_RESET
     );
     println!(
         "  {}Cache Read:   {:>12}{}",
-        YELLOW,
+        TERM_YELLOW,
         format_int_with_commas(unified.total_tokens.cache_read_tokens),
-        RESET
+        TERM_RESET
     );
     if unified.show_cache_create {
         println!(
             "  {}Cache Create: {:>12}{}",
-            ORANGE,
+            TERM_ORANGE,
             format_int_with_commas(unified.total_tokens.cache_create_tokens),
-            RESET
+            TERM_RESET
         );
     }
     println!(
         "  {}Total:        {:>12}{}",
-        BOLD,
+        TERM_BOLD,
         format_int_with_commas(unified.total_tokens.total()),
-        RESET
+        TERM_RESET
     );
     println!("{}", "-".repeat(50));
-    println!("{}Cost:{}", BOLD, RESET);
+    println!("{}Cost:{}", TERM_BOLD, TERM_RESET);
     println!(
         "  {} ${}{}",
-        RED,
+        TERM_RED,
         format_float_with_commas(unified.total_cost),
-        RESET
+        TERM_RESET
     );
     println!("{}", "-".repeat(50));
-    println!("{}Performance:{}", BOLD, RESET);
+    println!("{}Performance:{}", TERM_BOLD, TERM_RESET);
     println!("  Files Parsed: {}", unified.files_parsed);
     println!("  Parse Time:   {:.2} seconds", unified.parse_time);
     println!("{}", "=".repeat(50));

@@ -292,25 +292,25 @@ pub fn run_gemini_report() -> Option<(GeminiStats, f64)> {
 
 pub fn print_gemini_report(global_stats: &GeminiStats, parsing_time: f64, daily_days: usize) {
     println!("\n{}", "=".repeat(95));
-    println!("{}📊 GEMINI CLI USAGE & COST ESTIMATE{}", HEADER, RESET);
+    println!("{}📊 GEMINI CLI USAGE & COST ESTIMATE{}", TERM_HEADER, TERM_RESET);
     println!("{}", "=".repeat(95));
     println!(
         "{}Sessions Scanned:{} {}",
-        BOLD, RESET, global_stats.sessions_found
+        TERM_BOLD, TERM_RESET, global_stats.sessions_found
     );
     println!(
         "{}Total Messages:{}   {}",
-        BOLD,
-        RESET,
+        TERM_BOLD,
+        TERM_RESET,
         format_int_with_commas(global_stats.total_messages as i64)
     );
     println!("{}", "-".repeat(95));
 
     if !global_stats.model_stats.is_empty() {
-        println!("\n{}=== TOKEN USAGE (STACKED) ==={}", HEADER, RESET);
+        println!("\n{}=== TOKEN USAGE (STACKED) ==={}", TERM_HEADER, TERM_RESET);
         println!(
             "Legend: {}█ Input{} | {}█ Output{} | {}▒ Cache Read{}",
-            BLUE, RESET, GREEN, RESET, YELLOW, RESET
+            TERM_BLUE, TERM_RESET, TERM_GREEN, TERM_RESET, TERM_YELLOW, TERM_RESET
         );
 
         let max_model_len = global_stats
@@ -320,7 +320,7 @@ pub fn print_gemini_report(global_stats: &GeminiStats, parsing_time: f64, daily_
             .max()
             .unwrap_or(20)
             .min(30);
-        println!("\n{}--- Overall Usage by Model ---{}", BOLD, RESET);
+        println!("\n{}--- Overall Usage by Model ---{}", TERM_BOLD, TERM_RESET);
         let all_max_tokens = global_stats
             .model_stats
             .values()
@@ -343,12 +343,12 @@ pub fn print_gemini_report(global_stats: &GeminiStats, parsing_time: f64, daily_
             );
         }
 
-        println!("\n{}--- Monthly Breakdown by Model ---{}", BOLD, RESET);
+        println!("\n{}--- Monthly Breakdown by Model ---{}", TERM_BOLD, TERM_RESET);
         for (month, models) in global_stats.monthly_model_usage.iter().rev() {
             if month == "Unknown" {
                 continue;
             }
-            println!("\n{}{}{}", CYAN, month, RESET);
+            println!("\n{}{}{}", TERM_CYAN, month, TERM_RESET);
             let month_max = models.values().map(|s| s.total()).max().unwrap_or(1);
             let mut sorted_m: Vec<_> = models.iter().collect();
             sorted_m.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
@@ -368,9 +368,9 @@ pub fn print_gemini_report(global_stats: &GeminiStats, parsing_time: f64, daily_
         }
     }
 
-    println!("\n{}=== FINANCIAL COSTS ==={}", HEADER, RESET);
+    println!("\n{}=== FINANCIAL COSTS ==={}", TERM_HEADER, TERM_RESET);
     if !global_stats.monthly_costs.is_empty() {
-        println!("\n{}--- Monthly Costs ---{}", BOLD, RESET);
+        println!("\n{}--- Monthly Costs ---{}", TERM_BOLD, TERM_RESET);
         let max_month_cost = global_stats
             .monthly_costs
             .values()
@@ -387,7 +387,7 @@ pub fn print_gemini_report(global_stats: &GeminiStats, parsing_time: f64, daily_
     if !global_stats.daily_costs.is_empty() {
         println!(
             "\n{}--- Daily Costs (Last {} days) ---{}",
-            BOLD, daily_days, RESET
+            TERM_BOLD, daily_days, TERM_RESET
         );
         let max_day_cost = global_stats
             .daily_costs
@@ -411,43 +411,43 @@ pub fn print_gemini_report(global_stats: &GeminiStats, parsing_time: f64, daily_
     }
 
     println!("\n{}", "=".repeat(50));
-    println!("{}GRAND TOTALS (GEMINI CLI){}", HEADER, RESET);
+    println!("{}GRAND TOTALS (GEMINI CLI){}", TERM_HEADER, TERM_RESET);
     println!("{}", "-".repeat(50));
-    println!("{}Tokens:{}", BOLD, RESET);
+    println!("{}Tokens:{}", TERM_BOLD, TERM_RESET);
     println!(
         "  {}Input:       {:>12}{}",
-        BLUE,
+        TERM_BLUE,
         format_int_with_commas(total_tokens.in_tokens),
-        RESET
+        TERM_RESET
     );
     println!(
         "  {}Output:      {:>12}{}",
-        GREEN,
+        TERM_GREEN,
         format_int_with_commas(total_tokens.out_tokens),
-        RESET
+        TERM_RESET
     );
     println!(
         "  {}Cache:       {:>12}{}",
-        YELLOW,
+        TERM_YELLOW,
         format_int_with_commas(total_tokens.cache_read_tokens),
-        RESET
+        TERM_RESET
     );
     println!(
         "  {}Total:       {:>12}{}",
-        BOLD,
+        TERM_BOLD,
         format_int_with_commas(total_tokens.total()),
-        RESET
+        TERM_RESET
     );
     println!("{}", "-".repeat(50));
-    println!("{}Cost:{}", BOLD, RESET);
+    println!("{}Cost:{}", TERM_BOLD, TERM_RESET);
     println!(
         "  {} ${}{}",
-        RED,
+        TERM_RED,
         format_float_with_commas(total_cost),
-        RESET
+        TERM_RESET
     );
     println!("{}", "-".repeat(50));
-    println!("{}Performance:{}", BOLD, RESET);
+    println!("{}Performance:{}", TERM_BOLD, TERM_RESET);
     println!("  Sessions Parsed: {}", global_stats.sessions_found);
     println!("  Parse Time:      {:.2} seconds", parsing_time);
     println!("{}", "=".repeat(50));

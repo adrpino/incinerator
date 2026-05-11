@@ -279,16 +279,16 @@ pub fn run_cline_report(exclude_claude: bool, exclude_gemini: bool) -> Option<(C
 
 pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_days: usize) {
     println!("\n{}", "=".repeat(95));
-    println!("{}📊 CLINE USAGE & COST ESTIMATE{}", HEADER, RESET);
+    println!("{}📊 CLINE USAGE & COST ESTIMATE{}", TERM_HEADER, TERM_RESET);
     println!("{}", "=".repeat(95));
 
-    println!("\n{}=== TOKEN USAGE (STACKED) ==={}", HEADER, RESET);
+    println!("\n{}=== TOKEN USAGE (STACKED) ==={}", TERM_HEADER, TERM_RESET);
     println!(
         "Legend: {}█ Input{} | {}█ Output{} | {}▒ Cache Read{}",
-        BLUE, RESET, GREEN, RESET, YELLOW, RESET
+        TERM_BLUE, TERM_RESET, TERM_GREEN, TERM_RESET, TERM_YELLOW, TERM_RESET
     );
 
-    println!("\n{}--- Monthly Token Usage ---{}", BOLD, RESET);
+    println!("\n{}--- Monthly Token Usage ---{}", TERM_BOLD, TERM_RESET);
     let max_monthly_tokens = global_stats
         .monthly_tokens
         .values()
@@ -306,7 +306,7 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
     }
 
     if !global_stats.monthly_model_tokens.is_empty() {
-        println!("\n{}--- Monthly Token Usage by Model ---{}", BOLD, RESET);
+        println!("\n{}--- Monthly Token Usage by Model ---{}", TERM_BOLD, TERM_RESET);
         let mut global_max_model_tokens = 0;
         for models in global_stats.monthly_model_tokens.values() {
             for stats in models.values() {
@@ -317,7 +317,7 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
         }
 
         for (month, models) in &global_stats.monthly_model_tokens {
-            println!("{}{}{}:", CYAN, month, RESET);
+            println!("{}{}{}:", TERM_CYAN, month, TERM_RESET);
             let mut sorted_models: Vec<_> = models.iter().collect();
             sorted_models.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
             for (model, stats) in sorted_models {
@@ -334,7 +334,7 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
 
     println!(
         "\n{}--- Daily Token Usage (Last {} Days) ---{}",
-        BOLD, daily_days, RESET
+        TERM_BOLD, daily_days, TERM_RESET
     );
     let mut sorted_days: Vec<_> = global_stats.daily_tokens.iter().collect();
     sorted_days.sort_by(|a, b| a.0.cmp(b.0));
@@ -350,11 +350,11 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
         print_token_bar(&format!("{:<10}", day), stats, max_daily_tokens, 35, false);
     }
 
-    println!("\n\n{}=== FINANCIAL COSTS ==={}", HEADER, RESET);
+    println!("\n\n{}=== FINANCIAL COSTS ==={}", TERM_HEADER, TERM_RESET);
 
     println!(
         "\n{}--- Daily Costs (Last {} Days) ---{}",
-        BOLD, daily_days, RESET
+        TERM_BOLD, daily_days, TERM_RESET
     );
     let mut sorted_days_cost: Vec<_> = global_stats.daily_costs.iter().collect();
     sorted_days_cost.sort_by(|a, b| a.0.cmp(b.0));
@@ -373,7 +373,7 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
         print_cost_bar(&format!("{:<10}", day), cost, max_daily_cost, 35);
     }
 
-    println!("\n{}--- Monthly Costs ---{}", BOLD, RESET);
+    println!("\n{}--- Monthly Costs ---{}", TERM_BOLD, TERM_RESET);
     let max_monthly_cost = global_stats
         .monthly_costs
         .values()
@@ -384,10 +384,10 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
     }
 
     println!("\n{}", "=".repeat(50));
-    println!("{}GRAND TOTALS (CLINE){}", HEADER, RESET);
+    println!("{}GRAND TOTALS (CLINE){}", TERM_HEADER, TERM_RESET);
     println!("{}", "-".repeat(50));
 
-    println!("{}Tokens:{}", BOLD, RESET);
+    println!("{}Tokens:{}", TERM_BOLD, TERM_RESET);
     println!(
         "  Input:       {:>12}",
         format_int_with_commas(global_stats.total_tokens.in_tokens)
@@ -402,21 +402,21 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
     );
     println!(
         "  {}Total:       {:>12}{}",
-        BOLD,
+        TERM_BOLD,
         format_int_with_commas(global_stats.total_tokens.total()),
-        RESET
+        TERM_RESET
     );
 
     println!("{}", "-".repeat(50));
-    println!("{}Cost:{}", BOLD, RESET);
+    println!("{}Cost:{}", TERM_BOLD, TERM_RESET);
     println!(
         "  {}${}{}",
-        GREEN,
+        TERM_GREEN,
         format_float_with_commas(global_stats.total_cost),
-        RESET
+        TERM_RESET
     );
     println!("{}", "-".repeat(50));
-    println!("{}Performance:{}", BOLD, RESET);
+    println!("{}Performance:{}", TERM_BOLD, TERM_RESET);
     println!("  Files Parsed: {}", global_stats.files_found);
     println!("  Parse Time:   {:.2} seconds", parsing_time);
     println!("{}", "=".repeat(50));

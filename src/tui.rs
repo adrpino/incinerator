@@ -19,6 +19,10 @@ use crate::cline::{ClineStats, get_cline_storage_path};
 use crate::format::{format_currency, format_int_with_commas, format_tokens};
 use crate::gemini::{GeminiStats, get_gemini_storage_path};
 use crate::unified::UnifiedStats;
+use crate::colors::{
+    TUI_CYAN, TUI_DARK_GRAY, TUI_FLAME_ORANGE_1, TUI_FLAME_ORANGE_2, TUI_FLAME_RED_1,
+    TUI_FLAME_YELLOW_2, TUI_ORANGE_601, TUI_RED, TUI_WHITE, TUI_YELLOW, ThemeType,
+};
 use std::path::PathBuf;
 
 pub fn run_tui() -> io::Result<()> {
@@ -79,11 +83,15 @@ enum AppEvent {
 
 struct AppSettings {
     heat_effects: bool,
+    theme: ThemeType,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
-        Self { heat_effects: true }
+        Self {
+            heat_effects: true,
+            theme: ThemeType::default(),
+        }
     }
 }
 
@@ -136,12 +144,12 @@ impl ValueTracker {
         let elapsed = entry.1.elapsed().as_millis();
         match elapsed {
             0..=200 => Style::default()
-                .fg(Color::White)
+                .fg(TUI_WHITE)
                 .add_modifier(Modifier::BOLD),
             201..=600 => Style::default()
-                .fg(Color::Yellow)
+                .fg(TUI_YELLOW)
                 .add_modifier(Modifier::BOLD),
-            601..=1200 => Style::default().fg(Color::Rgb(255, 140, 0)), // Orange
+            601..=1200 => Style::default().fg(TUI_ORANGE_601), // Orange
             _ => Style::default().fg(base_color),
         }
     }
@@ -290,6 +298,10 @@ impl App {
                             self.settings.heat_effects = !self.settings.heat_effects;
                             terminal.draw(|f| self.draw(f))?;
                         }
+                        KeyCode::Char('t') if self.tab == Tab::Settings => {
+                            self.settings.theme = self.settings.theme.next();
+                            terminal.draw(|f| self.draw(f))?;
+                        }
                         KeyCode::Char(c @ ('1' | '2' | '3' | '4'))
                             if matches!(self.tab, Tab::DailyCosts | Tab::DailyTokens) =>
                         {
@@ -354,7 +366,7 @@ impl App {
                     .borders(Borders::ALL),
             )
             .select(self.tab.index())
-            .highlight_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+            .highlight_style(Style::default().fg(TUI_RED).add_modifier(Modifier::BOLD));
         f.render_widget(tabs, chunks[0]);
 
         match self.tab {
@@ -374,7 +386,7 @@ impl App {
                     " | Parsed: {} files ({:.2}s)",
                     self.stats.files_last_parsed, self.stats.parse_time
                 ),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(TUI_CYAN),
             ),
             Span::styled(
                 format!(
@@ -409,35 +421,36 @@ impl App {
         // Left: Totals
         let total_tokens = self.stats.total_tokens.total();
         let mut tracker = self.tracker.borrow_mut();
+        let palette = self.settings.theme.palette();
 
         let cost_style = tracker.get_style(
             "total_cost",
             self.stats.total_cost,
-            Color::Red,
+            palette.cost,
             self.settings.heat_effects,
         );
         let token_style = tracker.get_style(
             "total_tokens",
             total_tokens as f64,
-            Color::White,
+            TUI_WHITE,
             self.settings.heat_effects,
         );
         let in_style = tracker.get_style(
             "in_tokens",
             self.stats.total_tokens.in_tokens as f64,
-            Color::Blue,
+            palette.input,
             self.settings.heat_effects,
         );
         let out_style = tracker.get_style(
             "out_tokens",
             self.stats.total_tokens.out_tokens as f64,
-            Color::Green,
+            palette.output,
             self.settings.heat_effects,
         );
         let cache_style = tracker.get_style(
             "cache_tokens",
             self.stats.total_tokens.cache_read_tokens as f64,
-            Color::Yellow,
+            palette.cache_read,
             self.settings.heat_effects,
         );
 
@@ -481,7 +494,7 @@ impl App {
                 Span::raw("Files Scanned: "),
                 Span::styled(
                     format_int_with_commas(self.stats.files_parsed as i64),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(palette.secondary),
                 ),
             ]),
         ];
@@ -505,7 +518,7 @@ impl App {
                     .value(stats.total() as u64)
                     .label(Line::from((*name).clone()))
                     .text_value(format_tokens(stats.total()))
-                    .style(Style::default().fg(Color::Cyan))
+                    .style(Style::default().fg(palette.secondary))
             })
             .collect();
 
@@ -525,12 +538,13 @@ impl App {
         sorted_providers.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
 
         let mut tracker = self.tracker.borrow_mut();
+        let palette = self.settings.theme.palette();
         let provider_bars: Vec<Bar> = sorted_providers
             .iter()
             .map(|(provider, cost)| {
                 let id = format!("provider_{:?}", provider);
                 let style =
-                    tracker.get_style(&id, **cost, Color::Yellow, self.settings.heat_effects);
+                    tracker.get_style(&id, **cost, palette.cache_read, self.settings.heat_effects);
 
                 Bar::default()
                     .value((**cost * 100.0) as u64)
@@ -560,6 +574,7 @@ impl App {
             (DailyFilter::Gemini, "4"),
         ];
         let mut chip_spans: Vec<Span> = vec![Span::styled(" Filter: ", Style::default().dim())];
+        let palette = self.settings.theme.palette();
         for (filter, key) in chips {
             let active = filter == self.daily_filter;
             let label = if active {
@@ -568,7 +583,7 @@ impl App {
                 format!("  {}  ", filter.label())
             };
             let style = if active {
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                Style::default().fg(palette.cost).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().dim()
             };
@@ -599,6 +614,7 @@ impl App {
 
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let mut tracker = self.tracker.borrow_mut();
+        let palette = self.settings.theme.palette();
 
         let title = format!(" Daily Burn (USD) — {} ", self.daily_filter.label());
         let chart_area = chunks[1];
@@ -614,7 +630,7 @@ impl App {
                 let style = tracker.get_style(
                     &id,
                     **cost,
-                    Color::Red,
+                    palette.cost,
                     self.settings.heat_effects && is_today,
                 );
 
@@ -669,14 +685,15 @@ impl App {
         let chart_width = (area.width as usize).saturating_sub(45).max(10); // Leave space for labels and borders
 
         let mut lines = Vec::new();
+        let palette = self.settings.theme.palette();
 
         // Header/Legend
         lines.push(Line::from(vec![
             Span::styled("Legend: ", Style::default().dim()),
-            Span::styled("█ Input ", Style::default().fg(Color::Blue)),
-            Span::styled("█ Output ", Style::default().fg(Color::Green)),
-            Span::styled("▒ Cache Rd ", Style::default().fg(Color::Yellow)),
-            Span::styled("░ Cache Cr ", Style::default().fg(Color::Magenta)),
+            Span::styled("█ Input ", Style::default().fg(palette.input)),
+            Span::styled("█ Output ", Style::default().fg(palette.output)),
+            Span::styled("▒ Cache Rd ", Style::default().fg(palette.cache_read)),
+            Span::styled("░ Cache Cr ", Style::default().fg(palette.cache_create)),
         ]));
         lines.push(Line::from(""));
 
@@ -692,7 +709,7 @@ impl App {
             let total_style = tracker.get_style(
                 &id,
                 total as f64,
-                Color::White,
+                TUI_WHITE,
                 self.settings.heat_effects && is_today,
             );
 
@@ -707,10 +724,10 @@ impl App {
 
             let row = vec![
                 Span::raw(label),
-                Span::styled("█".repeat(w_in), Style::default().fg(Color::Blue)),
-                Span::styled("█".repeat(w_out), Style::default().fg(Color::Green)),
-                Span::styled("▒".repeat(w_c_rd), Style::default().fg(Color::Yellow)),
-                Span::styled("░".repeat(w_c_cr), Style::default().fg(Color::Magenta)),
+                Span::styled("█".repeat(w_in), Style::default().fg(palette.input)),
+                Span::styled("█".repeat(w_out), Style::default().fg(palette.output)),
+                Span::styled("▒".repeat(w_c_rd), Style::default().fg(palette.cache_read)),
+                Span::styled("░".repeat(w_c_cr), Style::default().fg(palette.cache_create)),
                 Span::raw(" "),
                 Span::styled(
                     format_tokens(total),
@@ -737,31 +754,56 @@ impl App {
     }
 
     fn draw_settings(&self, f: &mut Frame, area: Rect) {
+        let palette = self.settings.theme.palette();
         let check = if self.settings.heat_effects {
             "[X]"
         } else {
             "[ ]"
         };
+
+        let themes = [ThemeType::Classic, ThemeType::Vivid];
+        let mut theme_chips = vec![Span::raw("  Theme: ")];
+
+        for t in themes {
+            let active = t == self.settings.theme;
+            let label = if active {
+                format!(" [{}] ", t.name())
+            } else {
+                format!("  {}  ", t.name())
+            };
+            let style = if active {
+                Style::default().fg(palette.cost).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().dim()
+            };
+            theme_chips.push(Span::styled(label, style));
+        }
+
         let text = vec![
             Line::from(""),
             Line::from(vec![
                 Span::raw(format!("  {} ", check)),
                 Span::styled(
                     "Enable Heat Decay Effects",
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(palette.cache_read),
                 ),
             ]),
-            Line::from(""),
             Line::from(vec![
-                Span::styled("  Description: ", Style::default().dim()),
+                Span::styled("      Description: ", Style::default().dim()),
                 Span::raw(
                     "When values change, they flash 'white hot' and cool down to their base color.",
                 ),
             ]),
             Line::from(""),
+            Line::from(theme_chips),
+            Line::from(vec![
+                Span::styled("      Description: ", Style::default().dim()),
+                Span::raw(self.settings.theme.description()),
+            ]),
+            Line::from(""),
             Line::from(vec![
                 Span::styled("  Controls: ", Style::default().dim()),
-                Span::raw("Press [Space] to toggle."),
+                Span::raw("Press [Space] to toggle effects, [t] to switch theme."),
             ]),
         ];
 
@@ -971,50 +1013,45 @@ fn draw_splash(f: &mut Frame, progress: &ScanProgress, elapsed: Duration) {
 
     // Two-frame flame flicker (~150ms each)
     let frame = (elapsed.as_millis() / 150) % 2;
-    let (c_top, c_mid, c_low, c_base, c_char) = if frame == 0 {
-        (
-            Color::Yellow,
-            Color::Rgb(255, 165, 0),
-            Color::Red,
-            Color::Rgb(180, 30, 0),
-            Color::DarkGray,
-        )
-    } else {
-        (
-            Color::Rgb(255, 230, 80),
-            Color::Yellow,
-            Color::Rgb(255, 100, 0),
-            Color::Red,
-            Color::DarkGray,
-        )
-    };
 
-    let flame: Vec<Line> = vec![
-        Line::from(Span::styled(
-            "       )         (       ",
-            Style::default().fg(c_top),
-        )),
-        Line::from(Span::styled(
-            "      ( )       ( )      ",
-            Style::default().fg(c_top),
-        )),
-        Line::from(Span::styled(
-            "       )(  /\\  )(        ",
-            Style::default().fg(c_mid),
-        )),
-        Line::from(Span::styled(
-            "      ( )(_||_)( )       ",
-            Style::default().fg(c_low),
-        )),
-        Line::from(Span::styled(
-            "       )/______\\(        ",
-            Style::default().fg(c_base),
-        )),
-        Line::from(Span::styled(
-            "        '------'         ",
-            Style::default().fg(c_char),
-        )),
+    let raw_flame = [
+        "                 .:::.           ",
+        "         .      .:===:.          ",
+        "        .:.    .:==+==:.         ",
+        "       .:=:.  .:==+***++=:.      ",
+        "      .:=+=: .::=++***++=:.      ",
+        "     .:==++=:::=++*###*++=:.     ",
+        "    .:==+***+==++*###*++=:.      ",
+        "    .:=+*###*+++*##@@#*++=:.     ",
+        "    .:=+*#@@#***##@@@@#*+=:.     ",
+        "    .:==+*#@@@@@@@@@@#*++=:.     ",
+        "     .::=+*##########*++=:.      ",
+        "       .:::===++++===:::.        ",
+        "          ............           ",
     ];
+
+    let mut flame_lines = Vec::new();
+    for row in raw_flame {
+        let mut spans = Vec::new();
+        for c in row.chars() {
+            let style = match (c, frame) {
+                ('@', 0) => Style::default().fg(TUI_WHITE).add_modifier(Modifier::BOLD),
+                ('@', 1) => Style::default()
+                    .fg(TUI_FLAME_YELLOW_2)
+                    .add_modifier(Modifier::BOLD),
+                ('#', 0) => Style::default().fg(TUI_YELLOW),
+                ('#', 1) => Style::default().fg(TUI_FLAME_ORANGE_1),
+                ('*', 0) => Style::default().fg(TUI_FLAME_ORANGE_1),
+                ('*', 1) => Style::default().fg(TUI_FLAME_ORANGE_2),
+                ('+', 0) | ('=', 0) | (':', 0) => Style::default().fg(TUI_RED),
+                ('+', 1) | ('=', 1) | (':', 1) => Style::default().fg(TUI_FLAME_RED_1),
+                (' ', _) => Style::default(),
+                _ => Style::default().fg(TUI_DARK_GRAY),
+            };
+            spans.push(Span::styled(c.to_string(), style));
+        }
+        flame_lines.push(Line::from(spans));
+    }
 
     // Animated dots: . / .. / ... / ....
     let dot_count = ((elapsed.as_millis() / 350) % 4) as usize;
@@ -1036,29 +1073,29 @@ fn draw_splash(f: &mut Frame, progress: &ScanProgress, elapsed: Duration) {
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));
-    for l in flame {
+    for l in flame_lines {
         lines.push(l);
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "🔥 INCINERATOR 🔥",
-        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        Style::default().fg(TUI_RED).add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(Span::styled(
         "═══════════════════",
-        Style::default().fg(Color::Rgb(180, 30, 0)),
+        Style::default().fg(TUI_FLAME_RED_1),
     )));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         tabulating,
         Style::default()
-            .fg(Color::Yellow)
+            .fg(TUI_YELLOW)
             .add_modifier(Modifier::ITALIC),
     )));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled(bar_fill, Style::default().fg(Color::Red)),
-        Span::styled(bar_empty, Style::default().fg(Color::DarkGray)),
+        Span::styled(bar_fill, Style::default().fg(TUI_RED)),
+        Span::styled(bar_empty, Style::default().fg(TUI_DARK_GRAY)),
         Span::raw(format!("  {} / {} files", done, total)),
     ]));
 
