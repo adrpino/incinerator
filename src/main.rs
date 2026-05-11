@@ -68,7 +68,11 @@ fn main() {
     }
 
     match cli.command {
-        Some(Commands::Cline { exclude_claude, exclude_gemini, daily }) => {
+        Some(Commands::Cline {
+            exclude_claude,
+            exclude_gemini,
+            daily,
+        }) => {
             let days = daily.unwrap_or(default_daily);
             if let Some((stats, time)) = cline::run_cline_report(exclude_claude, exclude_gemini) {
                 cline::print_cline_report(&stats, time, days);

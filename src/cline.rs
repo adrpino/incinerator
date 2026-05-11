@@ -9,7 +9,7 @@ use walkdir::WalkDir;
 
 use crate::colors::*;
 use crate::format::{format_float_with_commas, format_int_with_commas};
-use crate::viz::{print_cost_bar, print_token_bar, TokenStats};
+use crate::viz::{TokenStats, print_cost_bar, print_token_bar};
 
 #[derive(Deserialize)]
 struct ClineModelUsage {
@@ -97,7 +97,9 @@ pub fn get_cline_storage_path() -> Option<PathBuf> {
     let ext_path = "globalStorage/saoudrizwan.claude-dev/tasks";
 
     #[cfg(target_os = "macos")]
-    let path = base.join("Library/Application Support/Code/User").join(ext_path);
+    let path = base
+        .join("Library/Application Support/Code/User")
+        .join(ext_path);
 
     #[cfg(target_os = "linux")]
     let path = base.join(".config/Code/User").join(ext_path);
@@ -114,7 +116,11 @@ pub fn get_cline_storage_path() -> Option<PathBuf> {
     Some(path)
 }
 
-pub fn parse_cline_file(path: &std::path::Path, exclude_claude: bool, exclude_gemini: bool) -> ClineStats {
+pub fn parse_cline_file(
+    path: &std::path::Path,
+    exclude_claude: bool,
+    exclude_gemini: bool,
+) -> ClineStats {
     let mut local = ClineStats::default();
     local.files_found = 1;
 
@@ -160,7 +166,10 @@ pub fn parse_cline_file(path: &std::path::Path, exclude_claude: bool, exclude_ge
                             c_read = data.cache_reads.unwrap_or(0);
                         }
                     }
-                } else if message.tokens_in.is_some() || message.tokens_out.is_some() || message.cost.is_some() {
+                } else if message.tokens_in.is_some()
+                    || message.tokens_out.is_some()
+                    || message.cost.is_some()
+                {
                     t_in = message.tokens_in.unwrap_or(0);
                     t_out = message.tokens_out.unwrap_or(0);
                     c_read = message.cache_reads.unwrap_or(0);
@@ -248,7 +257,9 @@ pub fn get_cline_files() -> Vec<PathBuf> {
 pub fn run_cline_report(exclude_claude: bool, exclude_gemini: bool) -> Option<(ClineStats, f64)> {
     let start_time = Instant::now();
     let paths = get_cline_files();
-    if paths.is_empty() { return None; }
+    if paths.is_empty() {
+        return None;
+    }
 
     let global_stats = paths
         .par_iter()
@@ -276,9 +287,20 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
     );
 
     println!("\n{}--- Monthly Token Usage ---{}", BOLD, RESET);
-    let max_monthly_tokens = global_stats.monthly_tokens.values().map(|s| s.total()).max().unwrap_or(0);
+    let max_monthly_tokens = global_stats
+        .monthly_tokens
+        .values()
+        .map(|s| s.total())
+        .max()
+        .unwrap_or(0);
     for (month, stats) in &global_stats.monthly_tokens {
-        print_token_bar(&format!("{:^10}", month), stats, max_monthly_tokens, 35, false);
+        print_token_bar(
+            &format!("{:^10}", month),
+            stats,
+            max_monthly_tokens,
+            35,
+            false,
+        );
     }
 
     if !global_stats.monthly_model_tokens.is_empty() {
@@ -297,37 +319,64 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
             let mut sorted_models: Vec<_> = models.iter().collect();
             sorted_models.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
             for (model, stats) in sorted_models {
-                print_token_bar(&format!("  {:<35}", model), stats, global_max_model_tokens, 35, false);
+                print_token_bar(
+                    &format!("  {:<35}", model),
+                    stats,
+                    global_max_model_tokens,
+                    35,
+                    false,
+                );
             }
         }
     }
 
-    println!("\n{}--- Daily Token Usage (Last {} Days) ---{}", BOLD, daily_days, RESET);
+    println!(
+        "\n{}--- Daily Token Usage (Last {} Days) ---{}",
+        BOLD, daily_days, RESET
+    );
     let mut sorted_days: Vec<_> = global_stats.daily_tokens.iter().collect();
     sorted_days.sort_by(|a, b| a.0.cmp(b.0));
     let last_n_days: Vec<_> = sorted_days.into_iter().rev().take(daily_days).collect();
     let last_n_days: Vec<_> = last_n_days.into_iter().rev().collect();
 
-    let max_daily_tokens = last_n_days.iter().map(|(_, s)| s.total()).max().unwrap_or(0);
+    let max_daily_tokens = last_n_days
+        .iter()
+        .map(|(_, s)| s.total())
+        .max()
+        .unwrap_or(0);
     for (day, stats) in last_n_days {
         print_token_bar(&format!("{:<10}", day), stats, max_daily_tokens, 35, false);
     }
 
     println!("\n\n{}=== FINANCIAL COSTS ==={}", HEADER, RESET);
 
-    println!("\n{}--- Daily Costs (Last {} Days) ---{}", BOLD, daily_days, RESET);
+    println!(
+        "\n{}--- Daily Costs (Last {} Days) ---{}",
+        BOLD, daily_days, RESET
+    );
     let mut sorted_days_cost: Vec<_> = global_stats.daily_costs.iter().collect();
     sorted_days_cost.sort_by(|a, b| a.0.cmp(b.0));
-    let last_n_days_cost: Vec<_> = sorted_days_cost.into_iter().rev().take(daily_days).collect();
+    let last_n_days_cost: Vec<_> = sorted_days_cost
+        .into_iter()
+        .rev()
+        .take(daily_days)
+        .collect();
     let last_n_days_cost: Vec<_> = last_n_days_cost.into_iter().rev().collect();
 
-    let max_daily_cost = last_n_days_cost.iter().map(|(_, c)| *c).fold(0.0_f64, |a, b| a.max(*b));
+    let max_daily_cost = last_n_days_cost
+        .iter()
+        .map(|(_, c)| *c)
+        .fold(0.0_f64, |a, b| a.max(*b));
     for (day, &cost) in last_n_days_cost {
         print_cost_bar(&format!("{:<10}", day), cost, max_daily_cost, 35);
     }
 
     println!("\n{}--- Monthly Costs ---{}", BOLD, RESET);
-    let max_monthly_cost = global_stats.monthly_costs.values().copied().fold(0.0_f64, |a, b| a.max(b));
+    let max_monthly_cost = global_stats
+        .monthly_costs
+        .values()
+        .copied()
+        .fold(0.0_f64, |a, b| a.max(b));
     for (month, &cost) in &global_stats.monthly_costs {
         print_cost_bar(&format!("{:^10}", month), cost, max_monthly_cost, 35);
     }
@@ -337,9 +386,18 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
     println!("{}", "-".repeat(50));
 
     println!("{}Tokens:{}", BOLD, RESET);
-    println!("  Input:       {:>12}", format_int_with_commas(global_stats.total_tokens.in_tokens));
-    println!("  Output:      {:>12}", format_int_with_commas(global_stats.total_tokens.out_tokens));
-    println!("  Cache Reads: {:>12}", format_int_with_commas(global_stats.total_tokens.cache_read_tokens));
+    println!(
+        "  Input:       {:>12}",
+        format_int_with_commas(global_stats.total_tokens.in_tokens)
+    );
+    println!(
+        "  Output:      {:>12}",
+        format_int_with_commas(global_stats.total_tokens.out_tokens)
+    );
+    println!(
+        "  Cache Reads: {:>12}",
+        format_int_with_commas(global_stats.total_tokens.cache_read_tokens)
+    );
     println!(
         "  {}Total:       {:>12}{}",
         BOLD,
@@ -349,7 +407,12 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
 
     println!("{}", "-".repeat(50));
     println!("{}Cost:{}", BOLD, RESET);
-    println!("  {}${}{}", GREEN, format_float_with_commas(global_stats.total_cost), RESET);
+    println!(
+        "  {}${}{}",
+        GREEN,
+        format_float_with_commas(global_stats.total_cost),
+        RESET
+    );
     println!("{}", "-".repeat(50));
     println!("{}Performance:{}", BOLD, RESET);
     println!("  Files Parsed: {}", global_stats.files_found);

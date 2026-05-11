@@ -10,7 +10,7 @@ use walkdir::WalkDir;
 
 use crate::colors::*;
 use crate::format::{format_float_with_commas, format_int_with_commas};
-use crate::viz::{print_cost_bar, print_token_bar, TokenStats};
+use crate::viz::{TokenStats, print_cost_bar, print_token_bar};
 
 #[derive(Deserialize)]
 struct ClaudeUsage {
@@ -158,13 +158,25 @@ pub fn parse_claude_file(file_path: &std::path::Path) -> ClaudeStats {
             cache_create_tokens: cache_create,
         };
 
-        local.daily_stats.entry(date_str.clone()).or_default().add(&entry);
+        local
+            .daily_stats
+            .entry(date_str.clone())
+            .or_default()
+            .add(&entry);
         *local.daily_costs.entry(date_str).or_insert(0.0) += turn_cost;
 
-        local.monthly_stats.entry(month_str.clone()).or_default().add(&entry);
+        local
+            .monthly_stats
+            .entry(month_str.clone())
+            .or_default()
+            .add(&entry);
         *local.monthly_costs.entry(month_str.clone()).or_insert(0.0) += turn_cost;
 
-        local.model_stats.entry(model.clone()).or_default().add(&entry);
+        local
+            .model_stats
+            .entry(model.clone())
+            .or_default()
+            .add(&entry);
         local
             .monthly_model_usage
             .entry(month_str)
@@ -197,7 +209,9 @@ pub fn get_claude_files() -> Vec<PathBuf> {
 pub fn run_claude_report() -> Option<(ClaudeStats, f64)> {
     let start_time = Instant::now();
     let session_files = get_claude_files();
-    if session_files.is_empty() { return None; }
+    if session_files.is_empty() {
+        return None;
+    }
 
     let global_stats = session_files
         .par_iter()
@@ -215,7 +229,10 @@ pub fn print_claude_report(global_stats: &ClaudeStats, parsing_time: f64, daily_
     println!("\n{}", "=".repeat(105));
     println!("{}📊 CLAUDE CLI USAGE & COST ESTIMATE{}", HEADER, RESET);
     println!("{}", "=".repeat(105));
-    println!("{}Sessions Scanned:{} {}", BOLD, RESET, global_stats.sessions_found);
+    println!(
+        "{}Sessions Scanned:{} {}",
+        BOLD, RESET, global_stats.sessions_found
+    );
     println!(
         "{}Total Messages:{}   {}",
         BOLD,
@@ -240,12 +257,21 @@ pub fn print_claude_report(global_stats: &ClaudeStats, parsing_time: f64, daily_
             .min(30);
 
         println!("\n{}--- Overall Usage by Model ---{}", BOLD, RESET);
-        let all_max_tokens = global_stats.model_stats.values().map(|s| s.total()).max().unwrap_or(0);
+        let all_max_tokens = global_stats
+            .model_stats
+            .values()
+            .map(|s| s.total())
+            .max()
+            .unwrap_or(0);
         let mut sorted_models: Vec<_> = global_stats.model_stats.iter().collect();
         sorted_models.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
         for (model, stats) in sorted_models {
             print_token_bar(
-                &format!("{:<width$}", model.get(..30).unwrap_or(model), width = max_model_len),
+                &format!(
+                    "{:<width$}",
+                    model.get(..30).unwrap_or(model),
+                    width = max_model_len
+                ),
                 stats,
                 all_max_tokens,
                 35,
@@ -264,7 +290,11 @@ pub fn print_claude_report(global_stats: &ClaudeStats, parsing_time: f64, daily_
             sorted_m.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
             for (model, stats) in sorted_m {
                 print_token_bar(
-                    &format!("  {:<width$}", model.get(..30).unwrap_or(model), width = max_model_len),
+                    &format!(
+                        "  {:<width$}",
+                        model.get(..30).unwrap_or(model),
+                        width = max_model_len
+                    ),
                     stats,
                     month_max,
                     35,
@@ -278,7 +308,11 @@ pub fn print_claude_report(global_stats: &ClaudeStats, parsing_time: f64, daily_
 
     if !global_stats.monthly_costs.is_empty() {
         println!("\n{}--- Monthly Costs ---{}", BOLD, RESET);
-        let max_month_cost = global_stats.monthly_costs.values().copied().fold(0.0_f64, |a, b| a.max(b));
+        let max_month_cost = global_stats
+            .monthly_costs
+            .values()
+            .copied()
+            .fold(0.0_f64, |a, b| a.max(b));
         for (month, cost) in global_stats.monthly_costs.iter().rev() {
             if month == "Unknown" {
                 continue;
@@ -288,8 +322,15 @@ pub fn print_claude_report(global_stats: &ClaudeStats, parsing_time: f64, daily_
     }
 
     if !global_stats.daily_costs.is_empty() {
-        println!("\n{}--- Daily Costs (Last {} days) ---{}", BOLD, daily_days, RESET);
-        let max_day_cost = global_stats.daily_costs.values().copied().fold(0.0_f64, |a, b| a.max(b));
+        println!(
+            "\n{}--- Daily Costs (Last {} days) ---{}",
+            BOLD, daily_days, RESET
+        );
+        let max_day_cost = global_stats
+            .daily_costs
+            .values()
+            .copied()
+            .fold(0.0_f64, |a, b| a.max(b));
         let mut sorted_days: Vec<_> = global_stats.daily_costs.iter().collect();
         sorted_days.sort_by(|a, b| a.0.cmp(b.0));
         for (day, cost) in sorted_days.into_iter().rev().take(daily_days) {
@@ -310,14 +351,44 @@ pub fn print_claude_report(global_stats: &ClaudeStats, parsing_time: f64, daily_
     println!("{}GRAND TOTALS (CLAUDE CLI){}", HEADER, RESET);
     println!("{}", "-".repeat(50));
     println!("{}Tokens:{}", BOLD, RESET);
-    println!("  {}Input:        {:>12}{}", BLUE, format_int_with_commas(total_tokens.in_tokens), RESET);
-    println!("  {}Output:       {:>12}{}", GREEN, format_int_with_commas(total_tokens.out_tokens), RESET);
-    println!("  {}Cache Read:   {:>12}{}", YELLOW, format_int_with_commas(total_tokens.cache_read_tokens), RESET);
-    println!("  {}Cache Create: {:>12}{}", ORANGE, format_int_with_commas(total_tokens.cache_create_tokens), RESET);
-    println!("  {}Total:        {:>12}{}", BOLD, format_int_with_commas(total_tokens.total()), RESET);
+    println!(
+        "  {}Input:        {:>12}{}",
+        BLUE,
+        format_int_with_commas(total_tokens.in_tokens),
+        RESET
+    );
+    println!(
+        "  {}Output:       {:>12}{}",
+        GREEN,
+        format_int_with_commas(total_tokens.out_tokens),
+        RESET
+    );
+    println!(
+        "  {}Cache Read:   {:>12}{}",
+        YELLOW,
+        format_int_with_commas(total_tokens.cache_read_tokens),
+        RESET
+    );
+    println!(
+        "  {}Cache Create: {:>12}{}",
+        ORANGE,
+        format_int_with_commas(total_tokens.cache_create_tokens),
+        RESET
+    );
+    println!(
+        "  {}Total:        {:>12}{}",
+        BOLD,
+        format_int_with_commas(total_tokens.total()),
+        RESET
+    );
     println!("{}", "-".repeat(50));
     println!("{}Cost:{}", BOLD, RESET);
-    println!("  {}${}{}", RED, format_float_with_commas(total_cost), RESET);
+    println!(
+        "  {}${}{}",
+        RED,
+        format_float_with_commas(total_cost),
+        RESET
+    );
     println!("{}", "-".repeat(50));
     println!("{}Performance:{}", BOLD, RESET);
     println!("  Sessions Parsed: {}", global_stats.sessions_found);

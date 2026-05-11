@@ -1,25 +1,25 @@
-use std::io;
-use std::sync::{mpsc, Arc};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, Instant, SystemTime};
-use std::cell::RefCell;
-use std::collections::HashMap;
 use crossterm::event::{self, Event, KeyCode};
+use notify::{RecursiveMode, Watcher};
 use ratatui::{
+    DefaultTerminal, Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Tabs, BarChart, Bar, BarGroup},
-    DefaultTerminal, Frame,
+    widgets::{Bar, BarChart, BarGroup, Block, Borders, Paragraph, Tabs},
 };
-use notify::{Watcher, RecursiveMode};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::io;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant, SystemTime};
 
+use crate::claude::{ClaudeStats, get_claude_storage_path};
+use crate::cline::{ClineStats, get_cline_storage_path};
+use crate::format::{format_currency, format_int_with_commas, format_tokens};
+use crate::gemini::{GeminiStats, get_gemini_storage_path};
 use crate::unified::UnifiedStats;
-use crate::format::{format_currency, format_tokens, format_int_with_commas};
 use std::path::PathBuf;
-use crate::cline::{get_cline_storage_path, ClineStats};
-use crate::claude::{get_claude_storage_path, ClaudeStats};
-use crate::gemini::{get_gemini_storage_path, GeminiStats};
 
 pub fn run_tui() -> io::Result<()> {
     let mut terminal = ratatui::init();
@@ -113,7 +113,9 @@ struct ValueTracker {
 
 impl ValueTracker {
     fn has_active_animations(&self) -> bool {
-        self.values.values().any(|(_, ts)| ts.elapsed().as_millis() < 1201)
+        self.values
+            .values()
+            .any(|(_, ts)| ts.elapsed().as_millis() < 1201)
     }
 
     fn get_style(&mut self, id: &str, current: f64, base_color: Color, enabled: bool) -> Style {
@@ -121,8 +123,11 @@ impl ValueTracker {
             return Style::default().fg(base_color);
         }
 
-        let entry = self.values.entry(id.to_string()).or_insert((current, Instant::now()));
-        
+        let entry = self
+            .values
+            .entry(id.to_string())
+            .or_insert((current, Instant::now()));
+
         if (current - entry.0).abs() > f64::EPSILON {
             entry.0 = current;
             entry.1 = Instant::now();
@@ -130,8 +135,12 @@ impl ValueTracker {
 
         let elapsed = entry.1.elapsed().as_millis();
         match elapsed {
-            0..=200 => Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-            201..=600 => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            0..=200 => Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+            201..=600 => Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
             601..=1200 => Style::default().fg(Color::Rgb(255, 140, 0)), // Orange
             _ => Style::default().fg(base_color),
         }
@@ -235,7 +244,8 @@ impl App {
             if let Ok(_) = res {
                 let _ = tx_file.send(AppEvent::FileChanged);
             }
-        }).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        })
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         if let Some(path) = get_cline_storage_path() {
             if path.exists() {
@@ -263,7 +273,7 @@ impl App {
 
         while !self.should_quit {
             let is_animating = self.tracker.borrow().has_active_animations();
-            
+
             if is_animating || was_animating || self.tab != last_tab {
                 terminal.draw(|f| self.draw(f))?;
                 last_tab = self.tab;
@@ -271,40 +281,38 @@ impl App {
             was_animating = is_animating;
 
             match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(AppEvent::Terminal(ev)) => {
-                    match ev {
-                        Event::Key(key) if key.kind == event::KeyEventKind::Press => {
-                            match key.code {
-                                KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
-                                KeyCode::Tab | KeyCode::Right => self.tab = self.tab.next(),
-                                KeyCode::BackTab | KeyCode::Left => self.tab = self.tab.prev(),
-                                KeyCode::Char(' ') if self.tab == Tab::Settings => {
-                                    self.settings.heat_effects = !self.settings.heat_effects;
-                                    terminal.draw(|f| self.draw(f))?;
-                                }
-                                KeyCode::Char(c @ ('1' | '2' | '3' | '4')) if matches!(self.tab, Tab::DailyCosts | Tab::DailyTokens) => {
-                                    self.daily_filter = match c {
-                                        '1' => DailyFilter::All,
-                                        '2' => DailyFilter::Cline,
-                                        '3' => DailyFilter::Claude,
-                                        '4' => DailyFilter::Gemini,
-                                        _ => self.daily_filter,
-                                    };
-                                    terminal.draw(|f| self.draw(f))?;
-                                }
-                                KeyCode::Char('r') => {
-                                    self.smart_scan();
-                                    terminal.draw(|f| self.draw(f))?;
-                                }
-                                _ => {}
-                            }
+                Ok(AppEvent::Terminal(ev)) => match ev {
+                    Event::Key(key) if key.kind == event::KeyEventKind::Press => match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+                        KeyCode::Tab | KeyCode::Right => self.tab = self.tab.next(),
+                        KeyCode::BackTab | KeyCode::Left => self.tab = self.tab.prev(),
+                        KeyCode::Char(' ') if self.tab == Tab::Settings => {
+                            self.settings.heat_effects = !self.settings.heat_effects;
+                            terminal.draw(|f| self.draw(f))?;
                         }
-                        Event::Resize(_, _) => {
+                        KeyCode::Char(c @ ('1' | '2' | '3' | '4'))
+                            if matches!(self.tab, Tab::DailyCosts | Tab::DailyTokens) =>
+                        {
+                            self.daily_filter = match c {
+                                '1' => DailyFilter::All,
+                                '2' => DailyFilter::Cline,
+                                '3' => DailyFilter::Claude,
+                                '4' => DailyFilter::Gemini,
+                                _ => self.daily_filter,
+                            };
+                            terminal.draw(|f| self.draw(f))?;
+                        }
+                        KeyCode::Char('r') => {
+                            self.smart_scan();
                             terminal.draw(|f| self.draw(f))?;
                         }
                         _ => {}
+                    },
+                    Event::Resize(_, _) => {
+                        terminal.draw(|f| self.draw(f))?;
                     }
-                }
+                    _ => {}
+                },
                 Ok(AppEvent::FileChanged) => {
                     needs_refresh = true;
                 }
@@ -332,9 +340,19 @@ impl App {
             .split(f.area());
 
         // Header
-        let titles = vec![" Summary ", " Providers ", " Daily Costs ", " Daily Tokens ", " Settings "];
+        let titles = vec![
+            " Summary ",
+            " Providers ",
+            " Daily Costs ",
+            " Daily Tokens ",
+            " Settings ",
+        ];
         let tabs = Tabs::new(titles)
-            .block(Block::default().title(" 🔥 INCINERATOR ").borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title(" 🔥 INCINERATOR ")
+                    .borders(Borders::ALL),
+            )
             .select(self.tab.index())
             .highlight_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
         f.render_widget(tabs, chunks[0]);
@@ -351,14 +369,29 @@ impl App {
             Span::styled(" [q] Quit ", Style::default().dim()),
             Span::styled(" [Tab] Switch View ", Style::default().dim()),
             Span::styled(" [r] Refresh ", Style::default().dim()),
-            Span::styled(format!(" | Parsed: {} files ({:.2}s)", self.stats.files_last_parsed, self.stats.parse_time), Style::default().fg(Color::Cyan)),
-            Span::styled(format!(" | Last update: {}s ago ", self.last_refresh.elapsed().as_secs()), Style::default().dim()),
+            Span::styled(
+                format!(
+                    " | Parsed: {} files ({:.2}s)",
+                    self.stats.files_last_parsed, self.stats.parse_time
+                ),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(
+                format!(
+                    " | Last update: {}s ago ",
+                    self.last_refresh.elapsed().as_secs()
+                ),
+                Style::default().dim(),
+            ),
         ];
-        
+
         if self.tab == Tab::Settings {
             // Add space for toggle but keep it clean
             let mut parts = footer_spans;
-            parts.insert(3, Span::styled(" [Space] Toggle ", Style::default().yellow()));
+            parts.insert(
+                3,
+                Span::styled(" [Space] Toggle ", Style::default().yellow()),
+            );
             let footer = Paragraph::new(Line::from(parts));
             f.render_widget(footer, chunks[2]);
         } else {
@@ -376,23 +409,57 @@ impl App {
         // Left: Totals
         let total_tokens = self.stats.total_tokens.total();
         let mut tracker = self.tracker.borrow_mut();
-        
-        let cost_style = tracker.get_style("total_cost", self.stats.total_cost, Color::Red, self.settings.heat_effects);
-        let token_style = tracker.get_style("total_tokens", total_tokens as f64, Color::White, self.settings.heat_effects);
-        let in_style = tracker.get_style("in_tokens", self.stats.total_tokens.in_tokens as f64, Color::Blue, self.settings.heat_effects);
-        let out_style = tracker.get_style("out_tokens", self.stats.total_tokens.out_tokens as f64, Color::Green, self.settings.heat_effects);
-        let cache_style = tracker.get_style("cache_tokens", self.stats.total_tokens.cache_read_tokens as f64, Color::Yellow, self.settings.heat_effects);
+
+        let cost_style = tracker.get_style(
+            "total_cost",
+            self.stats.total_cost,
+            Color::Red,
+            self.settings.heat_effects,
+        );
+        let token_style = tracker.get_style(
+            "total_tokens",
+            total_tokens as f64,
+            Color::White,
+            self.settings.heat_effects,
+        );
+        let in_style = tracker.get_style(
+            "in_tokens",
+            self.stats.total_tokens.in_tokens as f64,
+            Color::Blue,
+            self.settings.heat_effects,
+        );
+        let out_style = tracker.get_style(
+            "out_tokens",
+            self.stats.total_tokens.out_tokens as f64,
+            Color::Green,
+            self.settings.heat_effects,
+        );
+        let cache_style = tracker.get_style(
+            "cache_tokens",
+            self.stats.total_tokens.cache_read_tokens as f64,
+            Color::Yellow,
+            self.settings.heat_effects,
+        );
 
         let text = vec![
             Line::from(vec![
                 Span::raw("Total Cost:   "),
-                Span::styled(format_currency(self.stats.total_cost), cost_style.add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format_currency(self.stats.total_cost),
+                    cost_style.add_modifier(Modifier::BOLD),
+                ),
             ]),
             Line::from(""),
             Line::from(vec![
                 Span::raw("Total Tokens: "),
-                Span::styled(format_tokens(total_tokens), token_style.add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" ({})", format_int_with_commas(total_tokens)), Style::default().dim()),
+                Span::styled(
+                    format_tokens(total_tokens),
+                    token_style.add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" ({})", format_int_with_commas(total_tokens)),
+                    Style::default().dim(),
+                ),
             ]),
             Line::from(vec![
                 Span::raw("  Input:      "),
@@ -404,33 +471,50 @@ impl App {
             ]),
             Line::from(vec![
                 Span::raw("  Cache Read: "),
-                Span::styled(format_tokens(self.stats.total_tokens.cache_read_tokens), cache_style),
+                Span::styled(
+                    format_tokens(self.stats.total_tokens.cache_read_tokens),
+                    cache_style,
+                ),
             ]),
             Line::from(""),
             Line::from(vec![
                 Span::raw("Files Scanned: "),
-                Span::styled(format_int_with_commas(self.stats.files_parsed as i64), Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    format_int_with_commas(self.stats.files_parsed as i64),
+                    Style::default().fg(Color::Cyan),
+                ),
             ]),
         ];
-        
-        let totals = Paragraph::new(text)
-            .block(Block::default().title(" Grand Totals ").borders(Borders::ALL));
+
+        let totals = Paragraph::new(text).block(
+            Block::default()
+                .title(" Grand Totals ")
+                .borders(Borders::ALL),
+        );
         f.render_widget(totals, chunks[0]);
 
         // Right: Model Stats (Top 10)
         let mut sorted_models: Vec<_> = self.stats.model_stats.iter().collect();
         sorted_models.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
-        
-        let model_bars: Vec<Bar> = sorted_models.iter().take(10).map(|(name, stats)| {
-            Bar::default()
-                .value(stats.total() as u64)
-                .label(Line::from((*name).clone()))
-                .text_value(format_tokens(stats.total()))
-                .style(Style::default().fg(Color::Cyan))
-        }).collect();
+
+        let model_bars: Vec<Bar> = sorted_models
+            .iter()
+            .take(10)
+            .map(|(name, stats)| {
+                Bar::default()
+                    .value(stats.total() as u64)
+                    .label(Line::from((*name).clone()))
+                    .text_value(format_tokens(stats.total()))
+                    .style(Style::default().fg(Color::Cyan))
+            })
+            .collect();
 
         let barchart = BarChart::default()
-            .block(Block::default().title(" Top Models (Tokens) ").borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title(" Top Models (Tokens) ")
+                    .borders(Borders::ALL),
+            )
             .data(BarGroup::default().bars(&model_bars))
             .bar_width(12);
         f.render_widget(barchart, chunks[1]);
@@ -441,19 +525,27 @@ impl App {
         sorted_providers.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
 
         let mut tracker = self.tracker.borrow_mut();
-        let provider_bars: Vec<Bar> = sorted_providers.iter().map(|(provider, cost)| {
-            let id = format!("provider_{:?}", provider);
-            let style = tracker.get_style(&id, **cost, Color::Yellow, self.settings.heat_effects);
-            
-            Bar::default()
-                .value((**cost * 100.0) as u64)
-                .label(Line::from(provider.to_string()))
-                .text_value(format_currency(**cost))
-                .style(style)
-        }).collect();
+        let provider_bars: Vec<Bar> = sorted_providers
+            .iter()
+            .map(|(provider, cost)| {
+                let id = format!("provider_{:?}", provider);
+                let style =
+                    tracker.get_style(&id, **cost, Color::Yellow, self.settings.heat_effects);
+
+                Bar::default()
+                    .value((**cost * 100.0) as u64)
+                    .label(Line::from(provider.to_string()))
+                    .text_value(format_currency(**cost))
+                    .style(style)
+            })
+            .collect();
 
         let barchart = BarChart::default()
-            .block(Block::default().title(" Cost by Provider ").borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title(" Cost by Provider ")
+                    .borders(Borders::ALL),
+            )
             .data(BarGroup::default().bars(&provider_bars))
             .bar_width(15)
             .bar_gap(3);
@@ -511,17 +603,28 @@ impl App {
         let title = format!(" Daily Burn (USD) — {} ", self.daily_filter.label());
         let chart_area = chunks[1];
 
-        let daily_bars: Vec<Bar> = sorted_days.iter().rev().take(chart_area.width as usize / 10).rev().map(|(day, cost)| {
-            let id = format!("daily_cost_{:?}_{}", self.daily_filter, day);
-            let is_today = **day == today;
-            let style = tracker.get_style(&id, **cost, Color::Red, self.settings.heat_effects && is_today);
+        let daily_bars: Vec<Bar> = sorted_days
+            .iter()
+            .rev()
+            .take(chart_area.width as usize / 10)
+            .rev()
+            .map(|(day, cost)| {
+                let id = format!("daily_cost_{:?}_{}", self.daily_filter, day);
+                let is_today = **day == today;
+                let style = tracker.get_style(
+                    &id,
+                    **cost,
+                    Color::Red,
+                    self.settings.heat_effects && is_today,
+                );
 
-            Bar::default()
-                .value((**cost * 100.0) as u64)
-                .label(Line::from(day.split('-').last().unwrap_or("").to_string()))
-                .text_value(format_currency(**cost))
-                .style(style)
-        }).collect();
+                Bar::default()
+                    .value((**cost * 100.0) as u64)
+                    .label(Line::from(day.split('-').last().unwrap_or("").to_string()))
+                    .text_value(format_currency(**cost))
+                    .style(style)
+            })
+            .collect();
 
         let barchart = BarChart::default()
             .block(Block::default().title(title).borders(Borders::ALL))
@@ -584,8 +687,13 @@ impl App {
 
             let id = format!("daily_total_tokens_{:?}_{}", self.daily_filter, day);
             let is_today = **day == today;
-            let total_style = tracker.get_style(&id, total as f64, Color::White, self.settings.heat_effects && is_today);
-            
+            let total_style = tracker.get_style(
+                &id,
+                total as f64,
+                Color::White,
+                self.settings.heat_effects && is_today,
+            );
+
             let scale = |v: i64| -> usize {
                 ((v as f64 / max_total) * chart_width as f64).round() as usize
             };
@@ -602,33 +710,51 @@ impl App {
                 Span::styled("▒".repeat(w_c_rd), Style::default().fg(Color::Yellow)),
                 Span::styled("░".repeat(w_c_cr), Style::default().fg(Color::Magenta)),
                 Span::raw(" "),
-                Span::styled(format_tokens(total), total_style.add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format_tokens(total),
+                    total_style.add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" "),
-                Span::styled(format!("({})", format_int_with_commas(total)), Style::default().dim()),
+                Span::styled(
+                    format!("({})", format_int_with_commas(total)),
+                    Style::default().dim(),
+                ),
             ];
-            
+
             lines.push(Line::from(row));
         }
 
-        let title = format!(" Daily Token Breakdown (Stacked) — {} ", self.daily_filter.label());
-        let paragraph = Paragraph::new(lines)
-            .block(Block::default().title(title).borders(Borders::ALL));
+        let title = format!(
+            " Daily Token Breakdown (Stacked) — {} ",
+            self.daily_filter.label()
+        );
+        let paragraph =
+            Paragraph::new(lines).block(Block::default().title(title).borders(Borders::ALL));
 
         f.render_widget(paragraph, area);
     }
 
     fn draw_settings(&self, f: &mut Frame, area: Rect) {
-        let check = if self.settings.heat_effects { "[X]" } else { "[ ]" };
+        let check = if self.settings.heat_effects {
+            "[X]"
+        } else {
+            "[ ]"
+        };
         let text = vec![
             Line::from(""),
             Line::from(vec![
                 Span::raw(format!("  {} ", check)),
-                Span::styled("Enable Heat Decay Effects", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    "Enable Heat Decay Effects",
+                    Style::default().fg(Color::Yellow),
+                ),
             ]),
             Line::from(""),
             Line::from(vec![
                 Span::styled("  Description: ", Style::default().dim()),
-                Span::raw("When values change, they flash 'white hot' and cool down to their base color."),
+                Span::raw(
+                    "When values change, they flash 'white hot' and cool down to their base color.",
+                ),
             ]),
             Line::from(""),
             Line::from(vec![
@@ -637,8 +763,11 @@ impl App {
             ]),
         ];
 
-        let p = Paragraph::new(text)
-            .block(Block::default().title(" TUI Settings ").borders(Borders::ALL));
+        let p = Paragraph::new(text).block(
+            Block::default()
+                .title(" TUI Settings ")
+                .borders(Borders::ALL),
+        );
         f.render_widget(p, area);
     }
 }
@@ -647,12 +776,12 @@ fn run_scan_pass(
     mut cache: HashMap<PathBuf, (SystemTime, FileStats)>,
     progress: Arc<ScanProgress>,
 ) -> (HashMap<PathBuf, (SystemTime, FileStats)>, UnifiedStats) {
-    use crate::cline::{get_cline_files, parse_cline_file};
     use crate::claude::{get_claude_files, parse_claude_file};
+    use crate::cline::{get_cline_files, parse_cline_file};
     use crate::gemini::{get_gemini_files, parse_gemini_file};
     use rayon::prelude::*;
-    use std::fs;
     use std::collections::HashSet;
+    use std::fs;
 
     let start = Instant::now();
 
@@ -671,42 +800,60 @@ fn run_scan_pass(
     let t_walk_gemini = t.elapsed();
     let n_gemini = gemini_files.len();
 
-    progress.total.store((n_cline + n_claude + n_gemini) as u32, Ordering::Relaxed);
+    progress
+        .total
+        .store((n_cline + n_claude + n_gemini) as u32, Ordering::Relaxed);
 
-    let all_paths: HashSet<PathBuf> = cline_files.iter()
+    let all_paths: HashSet<PathBuf> = cline_files
+        .iter()
         .chain(claude_files.iter())
         .chain(gemini_files.iter())
         .cloned()
         .collect();
     cache.retain(|p, _| all_paths.contains(p));
 
-    enum PType { Cline, Claude, Gemini }
+    enum PType {
+        Cline,
+        Claude,
+        Gemini,
+    }
     let mut tasks = Vec::new();
-    for p in cline_files { tasks.push((p, PType::Cline)); }
-    for p in claude_files { tasks.push((p, PType::Claude)); }
-    for p in gemini_files { tasks.push((p, PType::Gemini)); }
+    for p in cline_files {
+        tasks.push((p, PType::Cline));
+    }
+    for p in claude_files {
+        tasks.push((p, PType::Claude));
+    }
+    for p in gemini_files {
+        tasks.push((p, PType::Gemini));
+    }
 
     let t_parse_start = Instant::now();
     let cache_ref = &cache;
     let progress_ref = &progress;
-    let results: Vec<(PathBuf, SystemTime, FileStats, bool, u64)> = tasks.into_par_iter().map(|(path, p_type)| {
-        let mtime = fs::metadata(&path).and_then(|m| m.modified()).unwrap_or(SystemTime::now());
-        if let Some((cached_time, cached_stats)) = cache_ref.get(&path) {
-            if *cached_time == mtime {
-                progress_ref.done.fetch_add(1, Ordering::Relaxed);
-                return (path, mtime, cached_stats.clone(), false, 0);
+    let results: Vec<(PathBuf, SystemTime, FileStats, bool, u64)> = tasks
+        .into_par_iter()
+        .map(|(path, p_type)| {
+            let mtime = fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::now());
+            if let Some((cached_time, cached_stats)) = cache_ref.get(&path) {
+                if *cached_time == mtime {
+                    progress_ref.done.fetch_add(1, Ordering::Relaxed);
+                    return (path, mtime, cached_stats.clone(), false, 0);
+                }
             }
-        }
-        let parse_start = Instant::now();
-        let stats = match p_type {
-            PType::Cline => FileStats::Cline(parse_cline_file(&path, false, false)),
-            PType::Claude => FileStats::Claude(parse_claude_file(&path)),
-            PType::Gemini => FileStats::Gemini(parse_gemini_file(&path)),
-        };
-        let parse_us = parse_start.elapsed().as_micros() as u64;
-        progress_ref.done.fetch_add(1, Ordering::Relaxed);
-        (path, mtime, stats, true, parse_us)
-    }).collect();
+            let parse_start = Instant::now();
+            let stats = match p_type {
+                PType::Cline => FileStats::Cline(parse_cline_file(&path, false, false)),
+                PType::Claude => FileStats::Claude(parse_claude_file(&path)),
+                PType::Gemini => FileStats::Gemini(parse_gemini_file(&path)),
+            };
+            let parse_us = parse_start.elapsed().as_micros() as u64;
+            progress_ref.done.fetch_add(1, Ordering::Relaxed);
+            (path, mtime, stats, true, parse_us)
+        })
+        .collect();
 
     let mut files_parsed = 0u32;
     let mut cline_n = 0u32;
@@ -725,17 +872,23 @@ fn run_scan_pass(
                 FileStats::Cline(_) => {
                     cline_n += 1;
                     cline_us_sum += parse_us;
-                    if parse_us > cline_us_max { cline_us_max = parse_us; }
+                    if parse_us > cline_us_max {
+                        cline_us_max = parse_us;
+                    }
                 }
                 FileStats::Claude(_) => {
                     claude_n += 1;
                     claude_us_sum += parse_us;
-                    if parse_us > claude_us_max { claude_us_max = parse_us; }
+                    if parse_us > claude_us_max {
+                        claude_us_max = parse_us;
+                    }
                 }
                 FileStats::Gemini(_) => {
                     gemini_n += 1;
                     gemini_us_sum += parse_us;
-                    if parse_us > gemini_us_max { gemini_us_max = parse_us; }
+                    if parse_us > gemini_us_max {
+                        gemini_us_max = parse_us;
+                    }
                 }
             }
         }
@@ -763,22 +916,40 @@ fn run_scan_pass(
 
     if std::env::var_os("INCINERATOR_DEBUG").is_some() {
         let log_path = std::env::temp_dir().join("incinerator-timings.log");
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
             use std::io::Write;
             let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S");
             let cache_size = cache.len();
             let cache_hits = cache_size.saturating_sub(files_parsed as usize);
-            let _ = writeln!(f,
+            let _ = writeln!(
+                f,
                 "[{}] mode={} walk_cline={}ms (n={}) walk_claude={}ms (n={}) walk_gemini={}ms (n={}) parse={}ms [cline n={} sum={}ms max={}ms | claude n={} sum={}ms max={}ms | gemini n={} sum={}ms max={}ms] agg={}ms total={}ms parsed={} cache_hits={} cache_size={}",
                 now,
-                if cfg!(debug_assertions) { "debug" } else { "release" },
-                t_walk_cline.as_millis(), n_cline,
-                t_walk_claude.as_millis(), n_claude,
-                t_walk_gemini.as_millis(), n_gemini,
+                if cfg!(debug_assertions) {
+                    "debug"
+                } else {
+                    "release"
+                },
+                t_walk_cline.as_millis(),
+                n_cline,
+                t_walk_claude.as_millis(),
+                n_claude,
+                t_walk_gemini.as_millis(),
+                n_gemini,
                 t_parse.as_millis(),
-                cline_n, cline_us_sum / 1000, cline_us_max / 1000,
-                claude_n, claude_us_sum / 1000, claude_us_max / 1000,
-                gemini_n, gemini_us_sum / 1000, gemini_us_max / 1000,
+                cline_n,
+                cline_us_sum / 1000,
+                cline_us_max / 1000,
+                claude_n,
+                claude_us_sum / 1000,
+                claude_us_max / 1000,
+                gemini_n,
+                gemini_us_sum / 1000,
+                gemini_us_max / 1000,
                 t_agg.as_millis(),
                 start.elapsed().as_millis(),
                 files_parsed,
@@ -817,12 +988,30 @@ fn draw_splash(f: &mut Frame, progress: &ScanProgress, elapsed: Duration) {
     };
 
     let flame: Vec<Line> = vec![
-        Line::from(Span::styled("       )         (       ", Style::default().fg(c_top))),
-        Line::from(Span::styled("      ( )       ( )      ", Style::default().fg(c_top))),
-        Line::from(Span::styled("       )(  /\\  )(        ", Style::default().fg(c_mid))),
-        Line::from(Span::styled("      ( )(_||_)( )       ", Style::default().fg(c_low))),
-        Line::from(Span::styled("       )/______\\(        ", Style::default().fg(c_base))),
-        Line::from(Span::styled("        '------'         ", Style::default().fg(c_char))),
+        Line::from(Span::styled(
+            "       )         (       ",
+            Style::default().fg(c_top),
+        )),
+        Line::from(Span::styled(
+            "      ( )       ( )      ",
+            Style::default().fg(c_top),
+        )),
+        Line::from(Span::styled(
+            "       )(  /\\  )(        ",
+            Style::default().fg(c_mid),
+        )),
+        Line::from(Span::styled(
+            "      ( )(_||_)( )       ",
+            Style::default().fg(c_low),
+        )),
+        Line::from(Span::styled(
+            "       )/______\\(        ",
+            Style::default().fg(c_base),
+        )),
+        Line::from(Span::styled(
+            "        '------'         ",
+            Style::default().fg(c_char),
+        )),
     ];
 
     // Animated dots: . / .. / ... / ....
@@ -832,7 +1021,11 @@ fn draw_splash(f: &mut Frame, progress: &ScanProgress, elapsed: Duration) {
 
     // Progress bar
     let bar_width = 22usize;
-    let pct = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+    let pct = if total > 0 {
+        done as f32 / total as f32
+    } else {
+        0.0
+    };
     let pct = pct.clamp(0.0, 1.0);
     let filled = (pct * bar_width as f32).round() as usize;
     let filled = filled.min(bar_width);
@@ -841,7 +1034,9 @@ fn draw_splash(f: &mut Frame, progress: &ScanProgress, elapsed: Duration) {
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));
-    for l in flame { lines.push(l); }
+    for l in flame {
+        lines.push(l);
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "🔥 INCINERATOR 🔥",
@@ -854,7 +1049,9 @@ fn draw_splash(f: &mut Frame, progress: &ScanProgress, elapsed: Duration) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         tabulating,
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::ITALIC),
     )));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
@@ -912,7 +1109,13 @@ mod tests {
 
     #[test]
     fn tab_next_and_prev_are_inverses() {
-        for t in [Tab::Summary, Tab::Providers, Tab::DailyCosts, Tab::DailyTokens, Tab::Settings] {
+        for t in [
+            Tab::Summary,
+            Tab::Providers,
+            Tab::DailyCosts,
+            Tab::DailyTokens,
+            Tab::Settings,
+        ] {
             assert_eq!(t.next().prev(), t);
             assert_eq!(t.prev().next(), t);
         }

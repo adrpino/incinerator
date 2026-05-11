@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
 
-use crate::claude::{run_claude_report, ClaudeStats};
-use crate::cline::{run_cline_report, ClineStats};
+use crate::claude::{ClaudeStats, run_claude_report};
+use crate::cline::{ClineStats, run_cline_report};
 use crate::colors::*;
 use crate::format::{format_float_with_commas, format_int_with_commas};
-use crate::gemini::{run_gemini_report, GeminiStats};
-use crate::viz::{TokenStats};
+use crate::gemini::{GeminiStats, run_gemini_report};
+use crate::viz::TokenStats;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Provider {
@@ -126,10 +126,16 @@ impl UnifiedStats {
         }
         self.merge_daily_tokens(&s.daily_stats);
         for (k, v) in &s.daily_stats {
-            self.daily_tokens_gemini.entry(k.clone()).or_default().add(v);
+            self.daily_tokens_gemini
+                .entry(k.clone())
+                .or_default()
+                .add(v);
         }
         let cost = s.monthly_costs.values().sum::<f64>();
-        *self.provider_costs.entry(Provider::GeminiCLI).or_insert(0.0) += cost;
+        *self
+            .provider_costs
+            .entry(Provider::GeminiCLI)
+            .or_insert(0.0) += cost;
         self.merge_monthly_tokens(&s.monthly_stats);
         self.merge_model_stats(s.model_stats.clone());
         let mut total = TokenStats::default();
@@ -149,10 +155,16 @@ impl UnifiedStats {
         }
         self.merge_daily_tokens(&s.daily_stats);
         for (k, v) in &s.daily_stats {
-            self.daily_tokens_claude.entry(k.clone()).or_default().add(v);
+            self.daily_tokens_claude
+                .entry(k.clone())
+                .or_default()
+                .add(v);
         }
         let cost = s.monthly_costs.values().sum::<f64>();
-        *self.provider_costs.entry(Provider::ClaudeCode).or_insert(0.0) += cost;
+        *self
+            .provider_costs
+            .entry(Provider::ClaudeCode)
+            .or_insert(0.0) += cost;
         self.merge_monthly_tokens(&s.monthly_stats);
         self.merge_model_stats(s.model_stats.clone());
         let mut total = TokenStats::default();
@@ -177,7 +189,10 @@ pub fn run_unified_report(daily_days: usize) {
     };
 
     println!("\n{}", "=".repeat(95));
-    println!("{}🔥 INCINERATOR: AI USAGE & COST ESTIMATE{}", HEADER, RESET);
+    println!(
+        "{}🔥 INCINERATOR: AI USAGE & COST ESTIMATE{}",
+        HEADER, RESET
+    );
     println!("{}", "=".repeat(95));
 
     println!("\n{}=== TOKEN USAGE (STACKED) ==={}", HEADER, RESET);
@@ -194,21 +209,47 @@ pub fn run_unified_report(daily_days: usize) {
     }
 
     println!("\n{}--- Monthly Token Usage ---{}", BOLD, RESET);
-    let max_monthly = unified.monthly_tokens.values().map(|s| s.total()).max().unwrap_or(0);
+    let max_monthly = unified
+        .monthly_tokens
+        .values()
+        .map(|s| s.total())
+        .max()
+        .unwrap_or(0);
     for (month, stats) in &unified.monthly_tokens {
         // Note: print_token_bar is in viz.rs
-        crate::viz::print_token_bar(&format!("{:^10}", month), stats, max_monthly, 35, unified.show_cache_create);
+        crate::viz::print_token_bar(
+            &format!("{:^10}", month),
+            stats,
+            max_monthly,
+            35,
+            unified.show_cache_create,
+        );
     }
 
     if !unified.model_stats.is_empty() {
         println!("\n{}--- Overall Usage by Model ---{}", BOLD, RESET);
-        let max_model_tokens = unified.model_stats.values().map(|s| s.total()).max().unwrap_or(0);
-        let max_model_len = unified.model_stats.keys().map(|m| m.len()).max().unwrap_or(20).min(30);
+        let max_model_tokens = unified
+            .model_stats
+            .values()
+            .map(|s| s.total())
+            .max()
+            .unwrap_or(0);
+        let max_model_len = unified
+            .model_stats
+            .keys()
+            .map(|m| m.len())
+            .max()
+            .unwrap_or(20)
+            .min(30);
         let mut sorted_models: Vec<_> = unified.model_stats.iter().collect();
         sorted_models.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
         for (model, stats) in sorted_models {
             crate::viz::print_token_bar(
-                &format!("{:<width$}", model.get(..30).unwrap_or(model), width = max_model_len),
+                &format!(
+                    "{:<width$}",
+                    model.get(..30).unwrap_or(model),
+                    width = max_model_len
+                ),
                 stats,
                 max_model_tokens,
                 35,
@@ -221,7 +262,11 @@ pub fn run_unified_report(daily_days: usize) {
 
     if !unified.monthly_costs.is_empty() {
         println!("\n{}--- Monthly Costs ---{}", BOLD, RESET);
-        let max_month_cost = unified.monthly_costs.values().copied().fold(0.0_f64, |a, b| a.max(b));
+        let max_month_cost = unified
+            .monthly_costs
+            .values()
+            .copied()
+            .fold(0.0_f64, |a, b| a.max(b));
         for (month, cost) in unified.monthly_costs.iter().rev() {
             if month == "Unknown" {
                 continue;
@@ -231,8 +276,15 @@ pub fn run_unified_report(daily_days: usize) {
     }
 
     if !unified.daily_costs.is_empty() {
-        println!("\n{}--- Daily Costs (Last {} days) ---{}", BOLD, daily_days, RESET);
-        let max_day_cost = unified.daily_costs.values().copied().fold(0.0_f64, |a, b| a.max(b));
+        println!(
+            "\n{}--- Daily Costs (Last {} days) ---{}",
+            BOLD, daily_days, RESET
+        );
+        let max_day_cost = unified
+            .daily_costs
+            .values()
+            .copied()
+            .fold(0.0_f64, |a, b| a.max(b));
         let mut sorted_days: Vec<_> = unified.daily_costs.iter().collect();
         sorted_days.sort_by(|a, b| a.0.cmp(b.0));
         for (day, cost) in sorted_days.into_iter().rev().take(daily_days) {
@@ -247,16 +299,46 @@ pub fn run_unified_report(daily_days: usize) {
     println!("{}GRAND TOTALS (UNIFIED){}", HEADER, RESET);
     println!("{}", "-".repeat(50));
     println!("{}Tokens:{}", BOLD, RESET);
-    println!("  {}Input:        {:>12}{}", BLUE, format_int_with_commas(unified.total_tokens.in_tokens), RESET);
-    println!("  {}Output:       {:>12}{}", GREEN, format_int_with_commas(unified.total_tokens.out_tokens), RESET);
-    println!("  {}Cache Read:   {:>12}{}", YELLOW, format_int_with_commas(unified.total_tokens.cache_read_tokens), RESET);
+    println!(
+        "  {}Input:        {:>12}{}",
+        BLUE,
+        format_int_with_commas(unified.total_tokens.in_tokens),
+        RESET
+    );
+    println!(
+        "  {}Output:       {:>12}{}",
+        GREEN,
+        format_int_with_commas(unified.total_tokens.out_tokens),
+        RESET
+    );
+    println!(
+        "  {}Cache Read:   {:>12}{}",
+        YELLOW,
+        format_int_with_commas(unified.total_tokens.cache_read_tokens),
+        RESET
+    );
     if unified.show_cache_create {
-        println!("  {}Cache Create: {:>12}{}", ORANGE, format_int_with_commas(unified.total_tokens.cache_create_tokens), RESET);
+        println!(
+            "  {}Cache Create: {:>12}{}",
+            ORANGE,
+            format_int_with_commas(unified.total_tokens.cache_create_tokens),
+            RESET
+        );
     }
-    println!("  {}Total:        {:>12}{}", BOLD, format_int_with_commas(unified.total_tokens.total()), RESET);
+    println!(
+        "  {}Total:        {:>12}{}",
+        BOLD,
+        format_int_with_commas(unified.total_tokens.total()),
+        RESET
+    );
     println!("{}", "-".repeat(50));
     println!("{}Cost:{}", BOLD, RESET);
-    println!("  {} ${}{}", RED, format_float_with_commas(unified.total_cost), RESET);
+    println!(
+        "  {} ${}{}",
+        RED,
+        format_float_with_commas(unified.total_cost),
+        RESET
+    );
     println!("{}", "-".repeat(50));
     println!("{}Performance:{}", BOLD, RESET);
     println!("  Files Parsed: {}", unified.files_parsed);
@@ -285,9 +367,12 @@ mod tests {
         s.daily_costs.insert("2026-05-10".into(), 1.50);
         s.daily_costs.insert("2026-05-11".into(), 2.00);
         s.monthly_costs.insert("2026-05".into(), 3.50);
-        s.daily_tokens.insert("2026-05-10".into(), ts(100, 50, 25, 0));
-        s.daily_tokens.insert("2026-05-11".into(), ts(200, 100, 50, 0));
-        s.monthly_tokens.insert("2026-05".into(), ts(300, 150, 75, 0));
+        s.daily_tokens
+            .insert("2026-05-10".into(), ts(100, 50, 25, 0));
+        s.daily_tokens
+            .insert("2026-05-11".into(), ts(200, 100, 50, 0));
+        s.monthly_tokens
+            .insert("2026-05".into(), ts(300, 150, 75, 0));
         s.total_cost = 3.50;
         s.total_tokens = ts(300, 150, 75, 0);
         s.files_found = 4;
@@ -298,9 +383,12 @@ mod tests {
         let mut s = ClaudeStats::default();
         s.daily_costs.insert("2026-05-11".into(), 5.25);
         s.monthly_costs.insert("2026-05".into(), 5.25);
-        s.daily_stats.insert("2026-05-11".into(), ts(500, 250, 100, 80));
-        s.monthly_stats.insert("2026-05".into(), ts(500, 250, 100, 80));
-        s.model_stats.insert("claude-sonnet-4-6".into(), ts(500, 250, 100, 80));
+        s.daily_stats
+            .insert("2026-05-11".into(), ts(500, 250, 100, 80));
+        s.monthly_stats
+            .insert("2026-05".into(), ts(500, 250, 100, 80));
+        s.model_stats
+            .insert("claude-sonnet-4-6".into(), ts(500, 250, 100, 80));
         s.sessions_found = 2;
         s
     }
@@ -311,7 +399,8 @@ mod tests {
         s.monthly_costs.insert("2026-05".into(), 1.00);
         s.daily_stats.insert("2026-05-11".into(), ts(50, 25, 10, 0));
         s.monthly_stats.insert("2026-05".into(), ts(50, 25, 10, 0));
-        s.model_stats.insert("claude-haiku-4-5".into(), ts(50, 25, 10, 0));
+        s.model_stats
+            .insert("claude-haiku-4-5".into(), ts(50, 25, 10, 0));
         s.sessions_found = 1;
         s
     }
@@ -322,7 +411,8 @@ mod tests {
         s.monthly_costs.insert("2026-05".into(), 0.75);
         s.daily_stats.insert("2026-05-11".into(), ts(80, 40, 0, 0));
         s.monthly_stats.insert("2026-05".into(), ts(80, 40, 0, 0));
-        s.model_stats.insert("gemini-3-pro".into(), ts(80, 40, 0, 0));
+        s.model_stats
+            .insert("gemini-3-pro".into(), ts(80, 40, 0, 0));
         s.sessions_found = 3;
         s
     }

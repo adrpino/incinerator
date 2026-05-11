@@ -41,24 +41,35 @@ pub fn print_token_bar(
     let w_in = scale(stats.in_tokens);
     let w_out = scale(stats.out_tokens);
     let w_cache_read = scale(stats.cache_read_tokens);
-    let w_cache_create = if show_cache_create { scale(stats.cache_create_tokens) } else { 0 };
+    let w_cache_create = if show_cache_create {
+        scale(stats.cache_create_tokens)
+    } else {
+        0
+    };
     let w_total_visible = w_in + w_out + w_cache_read + w_cache_create;
 
     let bar_str = if show_cache_create {
         format!(
             "{}{}{}{}{}{}{}{}{}",
-            BLUE, "█".repeat(w_in),
-            GREEN, "█".repeat(w_out),
-            YELLOW, "▒".repeat(w_cache_read),
-            ORANGE, "░".repeat(w_cache_create),
+            BLUE,
+            "█".repeat(w_in),
+            GREEN,
+            "█".repeat(w_out),
+            YELLOW,
+            "▒".repeat(w_cache_read),
+            ORANGE,
+            "░".repeat(w_cache_create),
             RESET
         )
     } else {
         format!(
             "{}{}{}{}{}{}{}",
-            BLUE, "█".repeat(w_in),
-            GREEN, "█".repeat(w_out),
-            YELLOW, "▒".repeat(w_cache_read),
+            BLUE,
+            "█".repeat(w_in),
+            GREEN,
+            "█".repeat(w_out),
+            YELLOW,
+            "▒".repeat(w_cache_read),
             RESET
         )
     };
@@ -73,18 +84,25 @@ pub fn print_token_bar(
     let stats_str = if show_cache_create {
         format!(
             "{}In:{} {}Out:{} {}C_Rd:{} {}C_Cr:{}{}",
-            BLUE, format_metric(stats.in_tokens as f64, 6),
-            GREEN, format_metric(stats.out_tokens as f64, 6),
-            YELLOW, format_metric(stats.cache_read_tokens as f64, 6),
-            ORANGE, format_metric(stats.cache_create_tokens as f64, 6),
+            BLUE,
+            format_metric(stats.in_tokens as f64, 6),
+            GREEN,
+            format_metric(stats.out_tokens as f64, 6),
+            YELLOW,
+            format_metric(stats.cache_read_tokens as f64, 6),
+            ORANGE,
+            format_metric(stats.cache_create_tokens as f64, 6),
             RESET
         )
     } else {
         format!(
             "{}In:{} {}Out:{} {}Cache:{}{}",
-            BLUE, format_metric(stats.in_tokens as f64, 7),
-            GREEN, format_metric(stats.out_tokens as f64, 7),
-            YELLOW, format_metric(stats.cache_read_tokens as f64, 7),
+            BLUE,
+            format_metric(stats.in_tokens as f64, 7),
+            GREEN,
+            format_metric(stats.out_tokens as f64, 7),
+            YELLOW,
+            format_metric(stats.cache_read_tokens as f64, 7),
             RESET
         )
     };
@@ -107,7 +125,13 @@ pub fn print_cost_bar(label: &str, cost: f64, max_cost: f64, bar_width: usize) {
     };
     let padding = " ".repeat(padding_needed);
 
-    println!("{} | {}{}| ${}", label, bar_str, padding, format_float_with_commas(cost));
+    println!(
+        "{} | {}{}| ${}",
+        label,
+        bar_str,
+        padding,
+        format_float_with_commas(cost)
+    );
 }
 
 #[cfg(test)]
