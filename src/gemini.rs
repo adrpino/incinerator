@@ -141,12 +141,10 @@ pub fn parse_gemini_file(file_path: &std::path::Path) -> GeminiStats {
     if file_path.to_string_lossy().ends_with(".jsonl") {
         if let Ok(file) = fs::File::open(file_path) {
             let reader = BufReader::new(file);
-            for line in reader.lines() {
-                if let Ok(l) = line {
-                    if let Ok(msg) = serde_json::from_str::<GeminiMessage>(&l) {
-                        if msg.msg_type.is_some() && msg.timestamp.is_some() {
-                            messages.push(msg);
-                        }
+            for l in reader.lines().map_while(Result::ok) {
+                if let Ok(msg) = serde_json::from_str::<GeminiMessage>(&l) {
+                    if msg.msg_type.is_some() && msg.timestamp.is_some() {
+                        messages.push(msg);
                     }
                 }
             }

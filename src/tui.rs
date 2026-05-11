@@ -240,12 +240,12 @@ impl App {
 
         // 2. File Watcher
         let tx_file = tx.clone();
-        let mut watcher = notify::recommended_watcher(move |res| {
-            if let Ok(_) = res {
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if res.is_ok() {
                 let _ = tx_file.send(AppEvent::FileChanged);
             }
         })
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
 
         if let Some(path) = get_cline_storage_path() {
             if path.exists() {
@@ -620,7 +620,9 @@ impl App {
 
                 Bar::default()
                     .value((**cost * 100.0) as u64)
-                    .label(Line::from(day.split('-').last().unwrap_or("").to_string()))
+                    .label(Line::from(
+                        day.split('-').next_back().unwrap_or("").to_string(),
+                    ))
                     .text_value(format_currency(**cost))
                     .style(style)
             })

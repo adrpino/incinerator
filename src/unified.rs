@@ -504,7 +504,7 @@ mod tests {
         assert_eq!(day.in_tokens, 200 + 500);
         assert_eq!(day.out_tokens, 100 + 250);
         assert_eq!(day.cache_read_tokens, 50 + 100);
-        assert_eq!(day.cache_create_tokens, 0 + 80);
+        assert_eq!(day.cache_create_tokens, 80);
     }
 
     #[test]

@@ -121,8 +121,10 @@ pub fn parse_cline_file(
     exclude_claude: bool,
     exclude_gemini: bool,
 ) -> ClineStats {
-    let mut local = ClineStats::default();
-    local.files_found = 1;
+    let mut local = ClineStats {
+        files_found: 1,
+        ..ClineStats::default()
+    };
 
     let task_dir = path.parent().unwrap();
     let metadata_path = task_dir.join("task_metadata.json");

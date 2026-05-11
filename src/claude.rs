@@ -201,7 +201,7 @@ pub fn get_claude_files() -> Vec<PathBuf> {
     WalkDir::new(&target_path)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "jsonl"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "jsonl"))
         .map(|e| e.path().to_path_buf())
         .collect()
 }
