@@ -195,11 +195,21 @@ pub fn run_unified_report(daily_days: usize) {
     );
     println!("{}", "=".repeat(95));
 
-    println!("\n{}=== TOKEN USAGE (STACKED) ==={}", TERM_HEADER, TERM_RESET);
+    println!(
+        "\n{}=== TOKEN USAGE (STACKED) ==={}",
+        TERM_HEADER, TERM_RESET
+    );
     if unified.show_cache_create {
         println!(
             "Legend: {}█ Input{} | {}█ Output{} | {}▒ Cache Read{} | {}░ Cache Create{}",
-            TERM_BLUE, TERM_RESET, TERM_GREEN, TERM_RESET, TERM_YELLOW, TERM_RESET, TERM_ORANGE, TERM_RESET
+            TERM_BLUE,
+            TERM_RESET,
+            TERM_GREEN,
+            TERM_RESET,
+            TERM_YELLOW,
+            TERM_RESET,
+            TERM_ORANGE,
+            TERM_RESET
         );
     } else {
         println!(
@@ -227,7 +237,10 @@ pub fn run_unified_report(daily_days: usize) {
     }
 
     if !unified.model_stats.is_empty() {
-        println!("\n{}--- Overall Usage by Model ---{}", TERM_BOLD, TERM_RESET);
+        println!(
+            "\n{}--- Overall Usage by Model ---{}",
+            TERM_BOLD, TERM_RESET
+        );
         let max_model_tokens = unified
             .model_stats
             .values()

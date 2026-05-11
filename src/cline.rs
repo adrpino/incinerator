@@ -279,10 +279,16 @@ pub fn run_cline_report(exclude_claude: bool, exclude_gemini: bool) -> Option<(C
 
 pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_days: usize) {
     println!("\n{}", "=".repeat(95));
-    println!("{}📊 CLINE USAGE & COST ESTIMATE{}", TERM_HEADER, TERM_RESET);
+    println!(
+        "{}📊 CLINE USAGE & COST ESTIMATE{}",
+        TERM_HEADER, TERM_RESET
+    );
     println!("{}", "=".repeat(95));
 
-    println!("\n{}=== TOKEN USAGE (STACKED) ==={}", TERM_HEADER, TERM_RESET);
+    println!(
+        "\n{}=== TOKEN USAGE (STACKED) ==={}",
+        TERM_HEADER, TERM_RESET
+    );
     println!(
         "Legend: {}█ Input{} | {}█ Output{} | {}▒ Cache Read{}",
         TERM_BLUE, TERM_RESET, TERM_GREEN, TERM_RESET, TERM_YELLOW, TERM_RESET
@@ -306,7 +312,10 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
     }
 
     if !global_stats.monthly_model_tokens.is_empty() {
-        println!("\n{}--- Monthly Token Usage by Model ---{}", TERM_BOLD, TERM_RESET);
+        println!(
+            "\n{}--- Monthly Token Usage by Model ---{}",
+            TERM_BOLD, TERM_RESET
+        );
         let mut global_max_model_tokens = 0;
         for models in global_stats.monthly_model_tokens.values() {
             for stats in models.values() {

@@ -5,6 +5,7 @@ mod cline;
 mod colors;
 mod format;
 mod gemini;
+mod pricing;
 mod tui;
 mod unified;
 mod viz;

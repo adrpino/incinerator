@@ -16,13 +16,13 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::claude::{ClaudeStats, get_claude_storage_path};
 use crate::cline::{ClineStats, get_cline_storage_path};
-use crate::format::{format_currency, format_int_with_commas, format_tokens};
-use crate::gemini::{GeminiStats, get_gemini_storage_path};
-use crate::unified::UnifiedStats;
 use crate::colors::{
     TUI_CYAN, TUI_DARK_GRAY, TUI_FLAME_ORANGE_1, TUI_FLAME_ORANGE_2, TUI_FLAME_RED_1,
     TUI_FLAME_YELLOW_2, TUI_ORANGE_601, TUI_RED, TUI_WHITE, TUI_YELLOW, ThemeType,
 };
+use crate::format::{format_currency, format_int_with_commas, format_tokens};
+use crate::gemini::{GeminiStats, get_gemini_storage_path};
+use crate::unified::UnifiedStats;
 use std::path::PathBuf;
 
 pub fn run_tui() -> io::Result<()> {
@@ -143,12 +143,8 @@ impl ValueTracker {
 
         let elapsed = entry.1.elapsed().as_millis();
         match elapsed {
-            0..=200 => Style::default()
-                .fg(TUI_WHITE)
-                .add_modifier(Modifier::BOLD),
-            201..=600 => Style::default()
-                .fg(TUI_YELLOW)
-                .add_modifier(Modifier::BOLD),
+            0..=200 => Style::default().fg(TUI_WHITE).add_modifier(Modifier::BOLD),
+            201..=600 => Style::default().fg(TUI_YELLOW).add_modifier(Modifier::BOLD),
             601..=1200 => Style::default().fg(TUI_ORANGE_601), // Orange
             _ => Style::default().fg(base_color),
         }
@@ -583,7 +579,9 @@ impl App {
                 format!("  {}  ", filter.label())
             };
             let style = if active {
-                Style::default().fg(palette.cost).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(palette.cost)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().dim()
             };
@@ -727,7 +725,10 @@ impl App {
                 Span::styled("█".repeat(w_in), Style::default().fg(palette.input)),
                 Span::styled("█".repeat(w_out), Style::default().fg(palette.output)),
                 Span::styled("▒".repeat(w_c_rd), Style::default().fg(palette.cache_read)),
-                Span::styled("░".repeat(w_c_cr), Style::default().fg(palette.cache_create)),
+                Span::styled(
+                    "░".repeat(w_c_cr),
+                    Style::default().fg(palette.cache_create),
+                ),
                 Span::raw(" "),
                 Span::styled(
                     format_tokens(total),
@@ -772,7 +773,9 @@ impl App {
                 format!("  {}  ", t.name())
             };
             let style = if active {
-                Style::default().fg(palette.cost).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(palette.cost)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().dim()
             };

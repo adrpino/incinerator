@@ -46,7 +46,9 @@ impl ThemeType {
     pub fn description(&self) -> &'static str {
         match self {
             ThemeType::Classic => "The standard incinerator look. Simple and familiar.",
-            ThemeType::Vivid => "High-contrast, modern palette optimized for clarity and visibility.",
+            ThemeType::Vivid => {
+                "High-contrast, modern palette optimized for clarity and visibility."
+            }
         }
     }
 
@@ -80,12 +82,12 @@ impl ThemeType {
                 secondary: TUI_CYAN,
             },
             ThemeType::Vivid => Palette {
-                input: Color::Rgb(0, 114, 178),     // Blue
-                output: Color::Rgb(0, 158, 115),    // Bluish Green
-                cache_read: Color::Rgb(240, 228, 66), // Yellow
+                input: Color::Rgb(0, 114, 178),          // Blue
+                output: Color::Rgb(0, 158, 115),         // Bluish Green
+                cache_read: Color::Rgb(240, 228, 66),    // Yellow
                 cache_create: Color::Rgb(204, 121, 167), // Reddish Purple
-                cost: Color::Rgb(213, 94, 0),       // Vermillion
-                secondary: Color::Rgb(86, 180, 233), // Sky Blue
+                cost: Color::Rgb(213, 94, 0),            // Vermillion
+                secondary: Color::Rgb(86, 180, 233),     // Sky Blue
             },
         }
     }
