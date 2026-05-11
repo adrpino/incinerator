@@ -51,26 +51,26 @@ pub fn print_token_bar(
     let bar_str = if show_cache_create {
         format!(
             "{}{}{}{}{}{}{}{}{}",
-            BLUE,
+            TERM_BLUE,
             "█".repeat(w_in),
-            GREEN,
+            TERM_GREEN,
             "█".repeat(w_out),
-            YELLOW,
+            TERM_YELLOW,
             "▒".repeat(w_cache_read),
-            ORANGE,
+            TERM_ORANGE,
             "░".repeat(w_cache_create),
-            RESET
+            TERM_RESET
         )
     } else {
         format!(
             "{}{}{}{}{}{}{}",
-            BLUE,
+            TERM_BLUE,
             "█".repeat(w_in),
-            GREEN,
+            TERM_GREEN,
             "█".repeat(w_out),
-            YELLOW,
+            TERM_YELLOW,
             "▒".repeat(w_cache_read),
-            RESET
+            TERM_RESET
         )
     };
 
@@ -84,26 +84,26 @@ pub fn print_token_bar(
     let stats_str = if show_cache_create {
         format!(
             "{}In:{} {}Out:{} {}C_Rd:{} {}C_Cr:{}{}",
-            BLUE,
+            TERM_BLUE,
             format_metric(stats.in_tokens as f64, 6),
-            GREEN,
+            TERM_GREEN,
             format_metric(stats.out_tokens as f64, 6),
-            YELLOW,
+            TERM_YELLOW,
             format_metric(stats.cache_read_tokens as f64, 6),
-            ORANGE,
+            TERM_ORANGE,
             format_metric(stats.cache_create_tokens as f64, 6),
-            RESET
+            TERM_RESET
         )
     } else {
         format!(
             "{}In:{} {}Out:{} {}Cache:{}{}",
-            BLUE,
+            TERM_BLUE,
             format_metric(stats.in_tokens as f64, 7),
-            GREEN,
+            TERM_GREEN,
             format_metric(stats.out_tokens as f64, 7),
-            YELLOW,
+            TERM_YELLOW,
             format_metric(stats.cache_read_tokens as f64, 7),
-            RESET
+            TERM_RESET
         )
     };
 
@@ -117,7 +117,7 @@ pub fn print_cost_bar(label: &str, cost: f64, max_cost: f64, bar_width: usize) {
         0
     };
 
-    let bar_str = format!("{}{}{}", GREEN, "█".repeat(bar_length), RESET);
+    let bar_str = format!("{}{}{}", TERM_GREEN, "█".repeat(bar_length), TERM_RESET);
     let padding_needed = if bar_width >= bar_length {
         bar_width - bar_length + 1
     } else {
