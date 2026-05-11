@@ -9,7 +9,7 @@ use walkdir::WalkDir;
 
 use crate::colors::*;
 use crate::format::{format_float_with_commas, format_int_with_commas};
-use crate::viz::{print_cost_bar, print_token_bar, TokenStats};
+use crate::viz::{TokenStats, print_cost_bar, print_token_bar};
 
 #[derive(Deserialize)]
 struct ClineModelUsage {
@@ -47,7 +47,7 @@ struct ClineApiReqData {
     cache_reads: Option<i64>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ClineStats {
     pub daily_costs: BTreeMap<String, f64>,
     pub monthly_costs: BTreeMap<String, f64>,
@@ -92,12 +92,14 @@ fn merge_cline_stats(mut a: ClineStats, b: ClineStats) -> ClineStats {
     a
 }
 
-fn get_cline_storage_path() -> Option<PathBuf> {
+pub fn get_cline_storage_path() -> Option<PathBuf> {
     let base = dirs::home_dir()?;
     let ext_path = "globalStorage/saoudrizwan.claude-dev/tasks";
 
     #[cfg(target_os = "macos")]
-    let path = base.join("Library/Application Support/Code/User").join(ext_path);
+    let path = base
+        .join("Library/Application Support/Code/User")
+        .join(ext_path);
 
     #[cfg(target_os = "linux")]
     let path = base.join(".config/Code/User").join(ext_path);
@@ -114,151 +116,161 @@ fn get_cline_storage_path() -> Option<PathBuf> {
     Some(path)
 }
 
-pub fn run_cline_report(exclude_claude: bool, exclude_gemini: bool) -> Option<(ClineStats, f64)> {
-    let tasks_path = match get_cline_storage_path() {
-        Some(p) => p,
-        None => {
-            println!("Error: Could not determine storage path for this OS.");
-            return None;
-        }
+pub fn parse_cline_file(
+    path: &std::path::Path,
+    exclude_claude: bool,
+    exclude_gemini: bool,
+) -> ClineStats {
+    let mut local = ClineStats {
+        files_found: 1,
+        ..ClineStats::default()
     };
 
-    if !tasks_path.is_dir() {
-        println!("Error: Directory not found at {}", tasks_path.display());
-        return None;
+    let task_dir = path.parent().unwrap();
+    let metadata_path = task_dir.join("task_metadata.json");
+
+    let mut model_usages = Vec::new();
+    if metadata_path.is_file() {
+        if let Ok(file) = fs::File::open(&metadata_path) {
+            let reader = std::io::BufReader::new(file);
+            if let Ok(metadata) = serde_json::from_reader::<_, ClineTaskMetadata>(reader) {
+                if let Some(usages) = metadata.model_usage {
+                    for u in usages {
+                        if let (Some(ts), Some(id)) = (u.ts, u.model_id) {
+                            model_usages.push((ts as i64, id));
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    println!("{}Scanning Cline conversation files in:{}\n{}\n", BOLD, RESET, tasks_path.display());
+    if let Ok(file) = fs::File::open(path) {
+        let reader = std::io::BufReader::new(file);
+        if let Ok(messages) = serde_json::from_reader::<_, Vec<ClineMessage>>(reader) {
+            for message in messages {
+                let mut cost = 0.0;
+                let mut t_in = 0;
+                let mut t_out = 0;
+                let mut c_read = 0;
 
-    let start_time = Instant::now();
+                let timestamp_ms = match message.ts {
+                    Some(t) => t as i64,
+                    None => continue,
+                };
 
-    let paths: Vec<PathBuf> = WalkDir::new(&tasks_path)
+                if message.say.as_deref() == Some("api_req_started") {
+                    if let Some(text) = message.text {
+                        if let Ok(data) = serde_json::from_str::<ClineApiReqData>(&text) {
+                            cost = data.cost.unwrap_or(0.0);
+                            t_in = data.tokens_in.unwrap_or(0);
+                            t_out = data.tokens_out.unwrap_or(0);
+                            c_read = data.cache_reads.unwrap_or(0);
+                        }
+                    }
+                } else if message.tokens_in.is_some()
+                    || message.tokens_out.is_some()
+                    || message.cost.is_some()
+                {
+                    t_in = message.tokens_in.unwrap_or(0);
+                    t_out = message.tokens_out.unwrap_or(0);
+                    c_read = message.cache_reads.unwrap_or(0);
+                    cost = message.cost.unwrap_or(0.0);
+                }
+
+                if (cost > 0.0 || t_in + t_out + c_read > 0) && timestamp_ms > 0 {
+                    let mut best_model = "unknown-model".to_string();
+                    let mut min_time_diff = i64::MAX;
+
+                    for (u_ts, u_id) in &model_usages {
+                        let time_diff = timestamp_ms - u_ts;
+                        if time_diff >= 0 && time_diff < min_time_diff {
+                            min_time_diff = time_diff;
+                            best_model = u_id.clone();
+                        }
+                    }
+
+                    let model_check = best_model.to_lowercase();
+                    if exclude_claude && model_check.contains("claude") {
+                        continue;
+                    }
+                    if exclude_gemini && model_check.contains("gemini") {
+                        continue;
+                    }
+
+                    let dt = Utc.timestamp_opt(timestamp_ms / 1000, 0).unwrap();
+                    let date_key = dt.format("%Y-%m-%d").to_string();
+                    let month_key = dt.format("%Y-%m").to_string();
+
+                    let entry = TokenStats {
+                        in_tokens: t_in,
+                        out_tokens: t_out,
+                        cache_read_tokens: c_read,
+                        cache_create_tokens: 0,
+                    };
+
+                    *local.daily_costs.entry(date_key.clone()).or_insert(0.0) += cost;
+                    *local.monthly_costs.entry(month_key.clone()).or_insert(0.0) += cost;
+                    *local
+                        .monthly_model_costs
+                        .entry(month_key.clone())
+                        .or_default()
+                        .entry(best_model.clone())
+                        .or_insert(0.0) += cost;
+                    local.total_cost += cost;
+
+                    local.daily_tokens.entry(date_key).or_default().add(&entry);
+                    local
+                        .monthly_tokens
+                        .entry(month_key.clone())
+                        .or_default()
+                        .add(&entry);
+                    local
+                        .monthly_model_tokens
+                        .entry(month_key)
+                        .or_default()
+                        .entry(best_model)
+                        .or_default()
+                        .add(&entry);
+                    local.total_tokens.add(&entry);
+                }
+            }
+        }
+    }
+    local
+}
+
+pub fn get_cline_files() -> Vec<PathBuf> {
+    let tasks_path = match get_cline_storage_path() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    if !tasks_path.is_dir() {
+        return Vec::new();
+    }
+    WalkDir::new(&tasks_path)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_name() == "ui_messages.json")
         .map(|e| e.path().to_path_buf())
-        .collect();
+        .collect()
+}
+
+pub fn run_cline_report(exclude_claude: bool, exclude_gemini: bool) -> Option<(ClineStats, f64)> {
+    let start_time = Instant::now();
+    let paths = get_cline_files();
+    if paths.is_empty() {
+        return None;
+    }
 
     let global_stats = paths
         .par_iter()
-        .map(|path| {
-            let mut local = ClineStats::default();
-            local.files_found = 1;
-
-            let task_dir = path.parent().unwrap();
-            let metadata_path = task_dir.join("task_metadata.json");
-
-            let mut model_usages = Vec::new();
-            if metadata_path.is_file() {
-                if let Ok(bytes) = fs::read(&metadata_path) {
-                    if let Ok(metadata) = serde_json::from_slice::<ClineTaskMetadata>(&bytes) {
-                        if let Some(usages) = metadata.model_usage {
-                            for u in usages {
-                                if let (Some(ts), Some(id)) = (u.ts, u.model_id) {
-                                    model_usages.push((ts as i64, id));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let Ok(bytes) = fs::read(path) {
-                if let Ok(messages) = serde_json::from_slice::<Vec<ClineMessage>>(&bytes) {
-                    for message in messages {
-                        let mut cost = 0.0;
-                        let mut t_in = 0;
-                        let mut t_out = 0;
-                        let mut c_read = 0;
-
-                        let timestamp_ms = match message.ts {
-                            Some(t) => t as i64,
-                            None => continue,
-                        };
-
-                        if message.say.as_deref() == Some("api_req_started") {
-                            if let Some(text) = message.text {
-                                if let Ok(data) = serde_json::from_str::<ClineApiReqData>(&text) {
-                                    cost = data.cost.unwrap_or(0.0);
-                                    t_in = data.tokens_in.unwrap_or(0);
-                                    t_out = data.tokens_out.unwrap_or(0);
-                                    c_read = data.cache_reads.unwrap_or(0);
-                                }
-                            }
-                        } else if message.tokens_in.is_some() || message.tokens_out.is_some() || message.cost.is_some() {
-                            t_in = message.tokens_in.unwrap_or(0);
-                            t_out = message.tokens_out.unwrap_or(0);
-                            c_read = message.cache_reads.unwrap_or(0);
-                            cost = message.cost.unwrap_or(0.0);
-                        }
-
-                        if (cost > 0.0 || t_in + t_out + c_read > 0) && timestamp_ms > 0 {
-                            let mut best_model = "unknown-model".to_string();
-                            let mut min_time_diff = i64::MAX;
-
-                            for (u_ts, u_id) in &model_usages {
-                                let time_diff = timestamp_ms - u_ts;
-                                if time_diff >= 0 && time_diff < min_time_diff {
-                                    min_time_diff = time_diff;
-                                    best_model = u_id.clone();
-                                }
-                            }
-
-                            let model_check = best_model.to_lowercase();
-                            if exclude_claude && model_check.contains("claude") {
-                                continue;
-                            }
-                            if exclude_gemini && model_check.contains("gemini") {
-                                continue;
-                            }
-
-                            let dt = Utc.timestamp_opt(timestamp_ms / 1000, 0).unwrap();
-                            let date_key = dt.format("%Y-%m-%d").to_string();
-                            let month_key = dt.format("%Y-%m").to_string();
-
-                            let entry = TokenStats {
-                                in_tokens: t_in,
-                                out_tokens: t_out,
-                                cache_read_tokens: c_read,
-                                cache_create_tokens: 0,
-                            };
-
-                            *local.daily_costs.entry(date_key.clone()).or_insert(0.0) += cost;
-                            *local.monthly_costs.entry(month_key.clone()).or_insert(0.0) += cost;
-                            *local
-                                .monthly_model_costs
-                                .entry(month_key.clone())
-                                .or_default()
-                                .entry(best_model.clone())
-                                .or_insert(0.0) += cost;
-                            local.total_cost += cost;
-
-                            local.daily_tokens.entry(date_key).or_default().add(&entry);
-                            local
-                                .monthly_tokens
-                                .entry(month_key.clone())
-                                .or_default()
-                                .add(&entry);
-                            local
-                                .monthly_model_tokens
-                                .entry(month_key)
-                                .or_default()
-                                .entry(best_model)
-                                .or_default()
-                                .add(&entry);
-                            local.total_tokens.add(&entry);
-                        }
-                    }
-                }
-            }
-            local
-        })
+        .map(|path| parse_cline_file(path, exclude_claude, exclude_gemini))
         .reduce(ClineStats::default, merge_cline_stats);
 
     let parsing_time = start_time.elapsed().as_secs_f64();
 
     if global_stats.daily_costs.is_empty() && global_stats.total_tokens.in_tokens == 0 {
-        println!("Scanned {} tasks, but no cost/token data found.", global_stats.files_found);
         return None;
     }
 
@@ -277,9 +289,20 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
     );
 
     println!("\n{}--- Monthly Token Usage ---{}", BOLD, RESET);
-    let max_monthly_tokens = global_stats.monthly_tokens.values().map(|s| s.total()).max().unwrap_or(0);
+    let max_monthly_tokens = global_stats
+        .monthly_tokens
+        .values()
+        .map(|s| s.total())
+        .max()
+        .unwrap_or(0);
     for (month, stats) in &global_stats.monthly_tokens {
-        print_token_bar(&format!("{:^10}", month), stats, max_monthly_tokens, 35, false);
+        print_token_bar(
+            &format!("{:^10}", month),
+            stats,
+            max_monthly_tokens,
+            35,
+            false,
+        );
     }
 
     if !global_stats.monthly_model_tokens.is_empty() {
@@ -298,37 +321,64 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
             let mut sorted_models: Vec<_> = models.iter().collect();
             sorted_models.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
             for (model, stats) in sorted_models {
-                print_token_bar(&format!("  {:<35}", model), stats, global_max_model_tokens, 35, false);
+                print_token_bar(
+                    &format!("  {:<35}", model),
+                    stats,
+                    global_max_model_tokens,
+                    35,
+                    false,
+                );
             }
         }
     }
 
-    println!("\n{}--- Daily Token Usage (Last {} Days) ---{}", BOLD, daily_days, RESET);
+    println!(
+        "\n{}--- Daily Token Usage (Last {} Days) ---{}",
+        BOLD, daily_days, RESET
+    );
     let mut sorted_days: Vec<_> = global_stats.daily_tokens.iter().collect();
     sorted_days.sort_by(|a, b| a.0.cmp(b.0));
     let last_n_days: Vec<_> = sorted_days.into_iter().rev().take(daily_days).collect();
     let last_n_days: Vec<_> = last_n_days.into_iter().rev().collect();
 
-    let max_daily_tokens = last_n_days.iter().map(|(_, s)| s.total()).max().unwrap_or(0);
+    let max_daily_tokens = last_n_days
+        .iter()
+        .map(|(_, s)| s.total())
+        .max()
+        .unwrap_or(0);
     for (day, stats) in last_n_days {
         print_token_bar(&format!("{:<10}", day), stats, max_daily_tokens, 35, false);
     }
 
     println!("\n\n{}=== FINANCIAL COSTS ==={}", HEADER, RESET);
 
-    println!("\n{}--- Daily Costs (Last {} Days) ---{}", BOLD, daily_days, RESET);
+    println!(
+        "\n{}--- Daily Costs (Last {} Days) ---{}",
+        BOLD, daily_days, RESET
+    );
     let mut sorted_days_cost: Vec<_> = global_stats.daily_costs.iter().collect();
     sorted_days_cost.sort_by(|a, b| a.0.cmp(b.0));
-    let last_n_days_cost: Vec<_> = sorted_days_cost.into_iter().rev().take(daily_days).collect();
+    let last_n_days_cost: Vec<_> = sorted_days_cost
+        .into_iter()
+        .rev()
+        .take(daily_days)
+        .collect();
     let last_n_days_cost: Vec<_> = last_n_days_cost.into_iter().rev().collect();
 
-    let max_daily_cost = last_n_days_cost.iter().map(|(_, c)| *c).fold(0.0_f64, |a, b| a.max(*b));
+    let max_daily_cost = last_n_days_cost
+        .iter()
+        .map(|(_, c)| *c)
+        .fold(0.0_f64, |a, b| a.max(*b));
     for (day, &cost) in last_n_days_cost {
         print_cost_bar(&format!("{:<10}", day), cost, max_daily_cost, 35);
     }
 
     println!("\n{}--- Monthly Costs ---{}", BOLD, RESET);
-    let max_monthly_cost = global_stats.monthly_costs.values().copied().fold(0.0_f64, |a, b| a.max(b));
+    let max_monthly_cost = global_stats
+        .monthly_costs
+        .values()
+        .copied()
+        .fold(0.0_f64, |a, b| a.max(b));
     for (month, &cost) in &global_stats.monthly_costs {
         print_cost_bar(&format!("{:^10}", month), cost, max_monthly_cost, 35);
     }
@@ -338,9 +388,18 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
     println!("{}", "-".repeat(50));
 
     println!("{}Tokens:{}", BOLD, RESET);
-    println!("  Input:       {:>12}", format_int_with_commas(global_stats.total_tokens.in_tokens));
-    println!("  Output:      {:>12}", format_int_with_commas(global_stats.total_tokens.out_tokens));
-    println!("  Cache Reads: {:>12}", format_int_with_commas(global_stats.total_tokens.cache_read_tokens));
+    println!(
+        "  Input:       {:>12}",
+        format_int_with_commas(global_stats.total_tokens.in_tokens)
+    );
+    println!(
+        "  Output:      {:>12}",
+        format_int_with_commas(global_stats.total_tokens.out_tokens)
+    );
+    println!(
+        "  Cache Reads: {:>12}",
+        format_int_with_commas(global_stats.total_tokens.cache_read_tokens)
+    );
     println!(
         "  {}Total:       {:>12}{}",
         BOLD,
@@ -350,7 +409,12 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
 
     println!("{}", "-".repeat(50));
     println!("{}Cost:{}", BOLD, RESET);
-    println!("  {}${}{}", GREEN, format_float_with_commas(global_stats.total_cost), RESET);
+    println!(
+        "  {}${}{}",
+        GREEN,
+        format_float_with_commas(global_stats.total_cost),
+        RESET
+    );
     println!("{}", "-".repeat(50));
     println!("{}Performance:{}", BOLD, RESET);
     println!("  Files Parsed: {}", global_stats.files_found);

@@ -41,24 +41,35 @@ pub fn print_token_bar(
     let w_in = scale(stats.in_tokens);
     let w_out = scale(stats.out_tokens);
     let w_cache_read = scale(stats.cache_read_tokens);
-    let w_cache_create = if show_cache_create { scale(stats.cache_create_tokens) } else { 0 };
+    let w_cache_create = if show_cache_create {
+        scale(stats.cache_create_tokens)
+    } else {
+        0
+    };
     let w_total_visible = w_in + w_out + w_cache_read + w_cache_create;
 
     let bar_str = if show_cache_create {
         format!(
             "{}{}{}{}{}{}{}{}{}",
-            BLUE, "█".repeat(w_in),
-            GREEN, "█".repeat(w_out),
-            YELLOW, "▒".repeat(w_cache_read),
-            ORANGE, "░".repeat(w_cache_create),
+            BLUE,
+            "█".repeat(w_in),
+            GREEN,
+            "█".repeat(w_out),
+            YELLOW,
+            "▒".repeat(w_cache_read),
+            ORANGE,
+            "░".repeat(w_cache_create),
             RESET
         )
     } else {
         format!(
             "{}{}{}{}{}{}{}",
-            BLUE, "█".repeat(w_in),
-            GREEN, "█".repeat(w_out),
-            YELLOW, "▒".repeat(w_cache_read),
+            BLUE,
+            "█".repeat(w_in),
+            GREEN,
+            "█".repeat(w_out),
+            YELLOW,
+            "▒".repeat(w_cache_read),
             RESET
         )
     };
@@ -73,18 +84,25 @@ pub fn print_token_bar(
     let stats_str = if show_cache_create {
         format!(
             "{}In:{} {}Out:{} {}C_Rd:{} {}C_Cr:{}{}",
-            BLUE, format_metric(stats.in_tokens as f64, 6),
-            GREEN, format_metric(stats.out_tokens as f64, 6),
-            YELLOW, format_metric(stats.cache_read_tokens as f64, 6),
-            ORANGE, format_metric(stats.cache_create_tokens as f64, 6),
+            BLUE,
+            format_metric(stats.in_tokens as f64, 6),
+            GREEN,
+            format_metric(stats.out_tokens as f64, 6),
+            YELLOW,
+            format_metric(stats.cache_read_tokens as f64, 6),
+            ORANGE,
+            format_metric(stats.cache_create_tokens as f64, 6),
             RESET
         )
     } else {
         format!(
             "{}In:{} {}Out:{} {}Cache:{}{}",
-            BLUE, format_metric(stats.in_tokens as f64, 7),
-            GREEN, format_metric(stats.out_tokens as f64, 7),
-            YELLOW, format_metric(stats.cache_read_tokens as f64, 7),
+            BLUE,
+            format_metric(stats.in_tokens as f64, 7),
+            GREEN,
+            format_metric(stats.out_tokens as f64, 7),
+            YELLOW,
+            format_metric(stats.cache_read_tokens as f64, 7),
             RESET
         )
     };
@@ -107,5 +125,65 @@ pub fn print_cost_bar(label: &str, cost: f64, max_cost: f64, bar_width: usize) {
     };
     let padding = " ".repeat(padding_needed);
 
-    println!("{} | {}{}| ${}", label, bar_str, padding, format_float_with_commas(cost));
+    println!(
+        "{} | {}{}| ${}",
+        label,
+        bar_str,
+        padding,
+        format_float_with_commas(cost)
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_stats_total_sums_all_buckets() {
+        let s = TokenStats {
+            in_tokens: 100,
+            out_tokens: 50,
+            cache_read_tokens: 25,
+            cache_create_tokens: 10,
+        };
+        assert_eq!(s.total(), 185);
+    }
+
+    #[test]
+    fn token_stats_total_default_is_zero() {
+        assert_eq!(TokenStats::default().total(), 0);
+    }
+
+    #[test]
+    fn token_stats_add_accumulates_each_bucket() {
+        let mut a = TokenStats {
+            in_tokens: 10,
+            out_tokens: 20,
+            cache_read_tokens: 30,
+            cache_create_tokens: 40,
+        };
+        let b = TokenStats {
+            in_tokens: 1,
+            out_tokens: 2,
+            cache_read_tokens: 3,
+            cache_create_tokens: 4,
+        };
+        a.add(&b);
+        assert_eq!(a.in_tokens, 11);
+        assert_eq!(a.out_tokens, 22);
+        assert_eq!(a.cache_read_tokens, 33);
+        assert_eq!(a.cache_create_tokens, 44);
+    }
+
+    #[test]
+    fn token_stats_add_zero_is_noop() {
+        let mut a = TokenStats {
+            in_tokens: 5,
+            out_tokens: 6,
+            cache_read_tokens: 7,
+            cache_create_tokens: 8,
+        };
+        a.add(&TokenStats::default());
+        assert_eq!(a.total(), 26);
+    }
 }
