@@ -27,10 +27,12 @@ pub fn format_float_with_commas(n: f64) -> String {
     format!("{}.{:02}", format_int_with_commas(int_part), frac_part)
 }
 
-/// Formats a token count into a human-readable string (e.g., 1.25M, 450.0K, 123)
+/// Formats a token count into a human-readable string (e.g., 1.2B, 1.25M, 450.0K, 123)
 pub fn format_tokens(n: i64) -> String {
     let n_f = n as f64;
-    if n_f.abs() >= 1_000_000.0 {
+    if n_f.abs() >= 1_000_000_000.0 {
+        format!("{:.2}B", n_f / 1_000_000_000.0)
+    } else if n_f.abs() >= 1_000_000.0 {
         format!("{:.2}M", n_f / 1_000_000.0)
     } else if n_f.abs() >= 1_000.0 {
         format!("{:.1}K", n_f / 1_000.0)
@@ -46,7 +48,9 @@ pub fn format_currency(amount: f64) -> String {
 
 /// Formats a number into a fixed-width metric string for alignment in bars/tables
 pub fn format_metric(n: f64, width: usize) -> String {
-    let s = if n >= 1_000_000.0 {
+    let s = if n >= 1_000_000_000.0 {
+        format!("{:.1}B", n / 1_000_000_000.0)
+    } else if n >= 1_000_000.0 {
         format!("{:.1}M", n / 1_000_000.0)
     } else if n >= 1_000.0 {
         format!("{:.1}K", n / 1_000.0)
@@ -61,16 +65,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_format_int_with_commas() {
+        assert_eq!(format_int_with_commas(0), "0");
+        assert_eq!(format_int_with_commas(123), "123");
+        assert_eq!(format_int_with_commas(1234), "1,234");
+        assert_eq!(format_int_with_commas(1000000), "1,000,000");
+        assert_eq!(format_int_with_commas(-1234), "-1,234");
+    }
+
+    #[test]
     fn test_format_tokens() {
+        assert_eq!(format_tokens(1_250_000_000), "1.25B");
         assert_eq!(format_tokens(1_250_000), "1.25M");
         assert_eq!(format_tokens(450_000), "450.0K");
         assert_eq!(format_tokens(1_500), "1.5K");
         assert_eq!(format_tokens(123), "123");
+        assert_eq!(format_tokens(0), "0");
+        assert_eq!(format_tokens(999), "999");
     }
 
     #[test]
     fn test_format_currency() {
         assert_eq!(format_currency(1234.56), "$1,234.56");
         assert_eq!(format_currency(0.05), "$0.05");
+        assert_eq!(format_currency(0.0), "$0.00");
+        assert_eq!(format_currency(1000000.0), "$1,000,000.00");
+    }
+
+    #[test]
+    fn test_format_metric() {
+        assert_eq!(format_metric(1_500_000_000.0, 6), "1.5B  ");
+        assert_eq!(format_metric(1_500_000.0, 6), "1.5M  ");
+        assert_eq!(format_metric(500.0, 4), "500 ");
     }
 }

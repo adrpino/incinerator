@@ -96,11 +96,7 @@ fn main() {
 }
 
 fn launch_tui() {
-    if let Some(stats) = unified::UnifiedStats::collect() {
-        if let Err(e) = tui::run_tui(stats) {
-            eprintln!("Error running TUI: {}", e);
-        }
-    } else {
-        println!("No usage data found from any source.");
+    if let Err(e) = tui::run_tui() {
+        eprintln!("Error running TUI: {}", e);
     }
 }

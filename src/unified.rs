@@ -27,7 +27,13 @@ impl std::fmt::Display for Provider {
 #[derive(Default, Clone)]
 pub struct UnifiedStats {
     pub daily_costs: BTreeMap<String, f64>,
+    pub daily_costs_cline: BTreeMap<String, f64>,
+    pub daily_costs_claude: BTreeMap<String, f64>,
+    pub daily_costs_gemini: BTreeMap<String, f64>,
     pub daily_tokens: BTreeMap<String, TokenStats>,
+    pub daily_tokens_cline: BTreeMap<String, TokenStats>,
+    pub daily_tokens_claude: BTreeMap<String, TokenStats>,
+    pub daily_tokens_gemini: BTreeMap<String, TokenStats>,
     pub monthly_costs: BTreeMap<String, f64>,
     pub monthly_tokens: BTreeMap<String, TokenStats>,
     pub model_stats: HashMap<String, TokenStats>,
@@ -36,6 +42,7 @@ pub struct UnifiedStats {
     pub total_cost: f64,
     pub parse_time: f64,
     pub files_parsed: u32,
+    pub files_last_parsed: u32,
     pub show_cache_create: bool,
 }
 
@@ -91,7 +98,13 @@ impl UnifiedStats {
 
     pub fn add_cline(&mut self, s: ClineStats, parse_time: f64) {
         self.merge_costs(&s.daily_costs, &s.monthly_costs);
+        for (k, v) in &s.daily_costs {
+            *self.daily_costs_cline.entry(k.clone()).or_insert(0.0) += v;
+        }
         self.merge_daily_tokens(&s.daily_tokens);
+        for (k, v) in &s.daily_tokens {
+            self.daily_tokens_cline.entry(k.clone()).or_default().add(v);
+        }
         *self.provider_costs.entry(Provider::Cline).or_insert(0.0) += s.total_cost;
         self.merge_monthly_tokens(&s.monthly_tokens);
         let flat_models: Vec<(String, TokenStats)> = s
@@ -108,7 +121,13 @@ impl UnifiedStats {
 
     pub fn add_gemini(&mut self, s: GeminiStats, parse_time: f64) {
         self.merge_costs(&s.daily_costs, &s.monthly_costs);
+        for (k, v) in &s.daily_costs {
+            *self.daily_costs_gemini.entry(k.clone()).or_insert(0.0) += v;
+        }
         self.merge_daily_tokens(&s.daily_stats);
+        for (k, v) in &s.daily_stats {
+            self.daily_tokens_gemini.entry(k.clone()).or_default().add(v);
+        }
         let cost = s.monthly_costs.values().sum::<f64>();
         *self.provider_costs.entry(Provider::GeminiCLI).or_insert(0.0) += cost;
         self.merge_monthly_tokens(&s.monthly_stats);
@@ -125,7 +144,13 @@ impl UnifiedStats {
 
     pub fn add_claude(&mut self, s: ClaudeStats, parse_time: f64) {
         self.merge_costs(&s.daily_costs, &s.monthly_costs);
+        for (k, v) in &s.daily_costs {
+            *self.daily_costs_claude.entry(k.clone()).or_insert(0.0) += v;
+        }
         self.merge_daily_tokens(&s.daily_stats);
+        for (k, v) in &s.daily_stats {
+            self.daily_tokens_claude.entry(k.clone()).or_default().add(v);
+        }
         let cost = s.monthly_costs.values().sum::<f64>();
         *self.provider_costs.entry(Provider::ClaudeCode).or_insert(0.0) += cost;
         self.merge_monthly_tokens(&s.monthly_stats);
@@ -237,4 +262,169 @@ pub fn run_unified_report(daily_days: usize) {
     println!("  Files Parsed: {}", unified.files_parsed);
     println!("  Parse Time:   {:.2} seconds", unified.parse_time);
     println!("{}", "=".repeat(50));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::claude::ClaudeStats;
+    use crate::cline::ClineStats;
+    use crate::gemini::GeminiStats;
+
+    fn ts(in_t: i64, out_t: i64, c_read: i64, c_create: i64) -> TokenStats {
+        TokenStats {
+            in_tokens: in_t,
+            out_tokens: out_t,
+            cache_read_tokens: c_read,
+            cache_create_tokens: c_create,
+        }
+    }
+
+    fn cline_fixture() -> ClineStats {
+        let mut s = ClineStats::default();
+        s.daily_costs.insert("2026-05-10".into(), 1.50);
+        s.daily_costs.insert("2026-05-11".into(), 2.00);
+        s.monthly_costs.insert("2026-05".into(), 3.50);
+        s.daily_tokens.insert("2026-05-10".into(), ts(100, 50, 25, 0));
+        s.daily_tokens.insert("2026-05-11".into(), ts(200, 100, 50, 0));
+        s.monthly_tokens.insert("2026-05".into(), ts(300, 150, 75, 0));
+        s.total_cost = 3.50;
+        s.total_tokens = ts(300, 150, 75, 0);
+        s.files_found = 4;
+        s
+    }
+
+    fn claude_fixture_with_cache_create() -> ClaudeStats {
+        let mut s = ClaudeStats::default();
+        s.daily_costs.insert("2026-05-11".into(), 5.25);
+        s.monthly_costs.insert("2026-05".into(), 5.25);
+        s.daily_stats.insert("2026-05-11".into(), ts(500, 250, 100, 80));
+        s.monthly_stats.insert("2026-05".into(), ts(500, 250, 100, 80));
+        s.model_stats.insert("claude-sonnet-4-6".into(), ts(500, 250, 100, 80));
+        s.sessions_found = 2;
+        s
+    }
+
+    fn claude_fixture_no_cache_create() -> ClaudeStats {
+        let mut s = ClaudeStats::default();
+        s.daily_costs.insert("2026-05-11".into(), 1.00);
+        s.monthly_costs.insert("2026-05".into(), 1.00);
+        s.daily_stats.insert("2026-05-11".into(), ts(50, 25, 10, 0));
+        s.monthly_stats.insert("2026-05".into(), ts(50, 25, 10, 0));
+        s.model_stats.insert("claude-haiku-4-5".into(), ts(50, 25, 10, 0));
+        s.sessions_found = 1;
+        s
+    }
+
+    fn gemini_fixture() -> GeminiStats {
+        let mut s = GeminiStats::default();
+        s.daily_costs.insert("2026-05-11".into(), 0.75);
+        s.monthly_costs.insert("2026-05".into(), 0.75);
+        s.daily_stats.insert("2026-05-11".into(), ts(80, 40, 0, 0));
+        s.monthly_stats.insert("2026-05".into(), ts(80, 40, 0, 0));
+        s.model_stats.insert("gemini-3-pro".into(), ts(80, 40, 0, 0));
+        s.sessions_found = 3;
+        s
+    }
+
+    #[test]
+    fn add_cline_populates_provider_specific_and_global_maps() {
+        let mut u = UnifiedStats::default();
+        u.add_cline(cline_fixture(), 0.12);
+
+        // Per-provider daily costs match the input
+        assert_eq!(u.daily_costs_cline.get("2026-05-10"), Some(&1.50));
+        assert_eq!(u.daily_costs_cline.get("2026-05-11"), Some(&2.00));
+        // Global daily costs match (only one provider added)
+        assert_eq!(u.daily_costs.get("2026-05-10"), Some(&1.50));
+        assert_eq!(u.daily_costs.get("2026-05-11"), Some(&2.00));
+        // Other providers untouched
+        assert!(u.daily_costs_claude.is_empty());
+        assert!(u.daily_costs_gemini.is_empty());
+
+        assert_eq!(u.provider_costs.get(&Provider::Cline), Some(&3.50));
+        assert!(!u.provider_costs.contains_key(&Provider::ClaudeCode));
+        assert_eq!(u.total_cost, 3.50);
+        assert_eq!(u.total_tokens.total(), 525);
+        assert_eq!(u.files_parsed, 4);
+        assert!((u.parse_time - 0.12).abs() < f64::EPSILON);
+        assert!(!u.show_cache_create);
+    }
+
+    #[test]
+    fn add_claude_with_cache_create_flips_flag() {
+        let mut u = UnifiedStats::default();
+        u.add_claude(claude_fixture_with_cache_create(), 0.0);
+        assert!(u.show_cache_create);
+        assert_eq!(u.provider_costs.get(&Provider::ClaudeCode), Some(&5.25));
+        assert_eq!(u.files_parsed, 2);
+    }
+
+    #[test]
+    fn add_claude_without_cache_create_leaves_flag_off() {
+        let mut u = UnifiedStats::default();
+        u.add_claude(claude_fixture_no_cache_create(), 0.0);
+        assert!(!u.show_cache_create);
+    }
+
+    #[test]
+    fn merging_multiple_providers_sums_global_but_keeps_per_provider_separate() {
+        let mut u = UnifiedStats::default();
+        u.add_cline(cline_fixture(), 0.10);
+        u.add_claude(claude_fixture_with_cache_create(), 0.20);
+        u.add_gemini(gemini_fixture(), 0.05);
+
+        // 2026-05-11 is shared across all three providers
+        let expected_05_11 = 2.00 + 5.25 + 0.75;
+        assert!((u.daily_costs.get("2026-05-11").unwrap() - expected_05_11).abs() < 1e-9);
+        // 2026-05-10 only has cline
+        assert_eq!(u.daily_costs.get("2026-05-10"), Some(&1.50));
+
+        // Per-provider maps stay isolated
+        assert_eq!(u.daily_costs_cline.get("2026-05-11"), Some(&2.00));
+        assert_eq!(u.daily_costs_claude.get("2026-05-11"), Some(&5.25));
+        assert_eq!(u.daily_costs_gemini.get("2026-05-11"), Some(&0.75));
+
+        // Per-provider costs reflect each provider individually
+        assert_eq!(u.provider_costs.get(&Provider::Cline), Some(&3.50));
+        assert_eq!(u.provider_costs.get(&Provider::ClaudeCode), Some(&5.25));
+        assert_eq!(u.provider_costs.get(&Provider::GeminiCLI), Some(&0.75));
+
+        // Grand total is the sum
+        assert!((u.total_cost - (3.50 + 5.25 + 0.75)).abs() < 1e-9);
+
+        // files_parsed accumulates across cline (files_found) + claude/gemini (sessions_found)
+        assert_eq!(u.files_parsed, 4 + 2 + 3);
+
+        // parse_time accumulates
+        assert!((u.parse_time - 0.35).abs() < 1e-9);
+
+        // show_cache_create stays sticky once flipped
+        assert!(u.show_cache_create);
+    }
+
+    #[test]
+    fn same_day_across_providers_sums_daily_tokens() {
+        let mut u = UnifiedStats::default();
+        u.add_cline(cline_fixture(), 0.0);
+        u.add_claude(claude_fixture_with_cache_create(), 0.0);
+
+        // 2026-05-11: cline contributes 200+100+50 = 350, claude contributes 500+250+100+80 = 930
+        let day = u.daily_tokens.get("2026-05-11").expect("day present");
+        assert_eq!(day.in_tokens, 200 + 500);
+        assert_eq!(day.out_tokens, 100 + 250);
+        assert_eq!(day.cache_read_tokens, 50 + 100);
+        assert_eq!(day.cache_create_tokens, 0 + 80);
+    }
+
+    #[test]
+    fn model_stats_track_each_provider() {
+        let mut u = UnifiedStats::default();
+        u.add_claude(claude_fixture_with_cache_create(), 0.0);
+        u.add_gemini(gemini_fixture(), 0.0);
+
+        assert!(u.model_stats.contains_key("claude-sonnet-4-6"));
+        assert!(u.model_stats.contains_key("gemini-3-pro"));
+        assert_eq!(u.model_stats.len(), 2);
+    }
 }
