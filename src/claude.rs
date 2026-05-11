@@ -10,6 +10,7 @@ use walkdir::WalkDir;
 
 use crate::colors::*;
 use crate::format::{format_float_with_commas, format_int_with_commas};
+use crate::pricing::get_pricing;
 use crate::viz::{TokenStats, print_cost_bar, print_token_bar};
 
 #[derive(Deserialize)]
@@ -32,21 +33,6 @@ struct ClaudeLogEntry {
     msg_type: Option<String>,
     timestamp: Option<String>,
     message: Option<ClaudeAssistantMessage>,
-}
-
-/// Per-1M-token pricing: (input, output, cache_create, cache_read).
-/// Source: 2026 rates as listed in the user's reference Python script.
-pub fn get_claude_pricing(model: &str) -> (f64, f64, f64, f64) {
-    let m = model.to_lowercase();
-    if m.contains("sonnet-4-6") || m.contains("sonnet-3-5") {
-        (3.00, 15.00, 3.75, 0.30)
-    } else if m.contains("opus-4-7") || m.contains("opus-3") {
-        (5.00, 25.00, 6.25, 0.50)
-    } else if m.contains("haiku-4-5") || m.contains("haiku-3-5") {
-        (1.00, 5.00, 1.25, 0.10)
-    } else {
-        (3.00, 15.00, 3.75, 0.30)
-    }
 }
 
 #[derive(Default, Clone)]
@@ -145,11 +131,11 @@ pub fn parse_claude_file(file_path: &std::path::Path) -> ClaudeStats {
             continue;
         }
 
-        let (p_in, p_out, p_cc, p_cr) = get_claude_pricing(&model);
-        let turn_cost = (in_tokens as f64 / 1_000_000.0 * p_in)
-            + (out_tokens as f64 / 1_000_000.0 * p_out)
-            + (cache_create as f64 / 1_000_000.0 * p_cc)
-            + (cache_read as f64 / 1_000_000.0 * p_cr);
+        let pricing = get_pricing(&model, 0);
+        let turn_cost = (in_tokens as f64 / 1_000_000.0 * pricing.input)
+            + (out_tokens as f64 / 1_000_000.0 * pricing.output)
+            + (cache_create as f64 / 1_000_000.0 * pricing.cache_write)
+            + (cache_read as f64 / 1_000_000.0 * pricing.cache_read);
 
         let entry = TokenStats {
             in_tokens,
@@ -227,7 +213,10 @@ pub fn run_claude_report() -> Option<(ClaudeStats, f64)> {
 
 pub fn print_claude_report(global_stats: &ClaudeStats, parsing_time: f64, daily_days: usize) {
     println!("\n{}", "=".repeat(105));
-    println!("{}📊 CLAUDE CLI USAGE & COST ESTIMATE{}", TERM_HEADER, TERM_RESET);
+    println!(
+        "{}📊 CLAUDE CLI USAGE & COST ESTIMATE{}",
+        TERM_HEADER, TERM_RESET
+    );
     println!("{}", "=".repeat(105));
     println!(
         "{}Sessions Scanned:{} {}",
@@ -242,10 +231,20 @@ pub fn print_claude_report(global_stats: &ClaudeStats, parsing_time: f64, daily_
     println!("{}", "-".repeat(105));
 
     if !global_stats.model_stats.is_empty() {
-        println!("\n{}=== TOKEN USAGE (STACKED) ==={}", TERM_HEADER, TERM_RESET);
+        println!(
+            "\n{}=== TOKEN USAGE (STACKED) ==={}",
+            TERM_HEADER, TERM_RESET
+        );
         println!(
             "Legend: {}█ Input{} | {}█ Output{} | {}▒ Cache Read{} | {}░ Cache Create{}",
-            TERM_BLUE, TERM_RESET, TERM_GREEN, TERM_RESET, TERM_YELLOW, TERM_RESET, TERM_ORANGE, TERM_RESET
+            TERM_BLUE,
+            TERM_RESET,
+            TERM_GREEN,
+            TERM_RESET,
+            TERM_YELLOW,
+            TERM_RESET,
+            TERM_ORANGE,
+            TERM_RESET
         );
 
         let max_model_len = global_stats
@@ -256,7 +255,10 @@ pub fn print_claude_report(global_stats: &ClaudeStats, parsing_time: f64, daily_
             .unwrap_or(20)
             .min(30);
 
-        println!("\n{}--- Overall Usage by Model ---{}", TERM_BOLD, TERM_RESET);
+        println!(
+            "\n{}--- Overall Usage by Model ---{}",
+            TERM_BOLD, TERM_RESET
+        );
         let all_max_tokens = global_stats
             .model_stats
             .values()
@@ -279,7 +281,10 @@ pub fn print_claude_report(global_stats: &ClaudeStats, parsing_time: f64, daily_
             );
         }
 
-        println!("\n{}--- Monthly Breakdown by Model ---{}", TERM_BOLD, TERM_RESET);
+        println!(
+            "\n{}--- Monthly Breakdown by Model ---{}",
+            TERM_BOLD, TERM_RESET
+        );
         for (month, models) in global_stats.monthly_model_usage.iter().rev() {
             if month == "Unknown" {
                 continue;
@@ -398,21 +403,26 @@ pub fn print_claude_report(global_stats: &ClaudeStats, parsing_time: f64, daily_
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::pricing::get_claude_pricing;
 
     #[test]
     fn test_claude_pricing() {
-        let (i, o, cc, cr) = get_claude_pricing("claude-sonnet-4-6-20251001");
-        assert_eq!((i, o, cc, cr), (3.00, 15.00, 3.75, 0.30));
+        let pricing = get_claude_pricing("claude-sonnet-4-6-20251001");
+        assert_eq!(pricing.input, 3.00);
+        assert_eq!(pricing.output, 15.00);
+        assert_eq!(pricing.cache_write, 3.75);
+        assert_eq!(pricing.cache_read, 0.30);
 
-        let (i, o, cc, cr) = get_claude_pricing("claude-opus-4-7");
-        assert_eq!((i, o, cc, cr), (5.00, 25.00, 6.25, 0.50));
+        let pricing = get_claude_pricing("claude-opus-4-7");
+        assert_eq!(pricing.input, 5.00);
+        assert_eq!(pricing.output, 25.00);
 
-        let (i, o, cc, cr) = get_claude_pricing("claude-haiku-4-5-20251001");
-        assert_eq!((i, o, cc, cr), (1.00, 5.00, 1.25, 0.10));
+        let pricing = get_claude_pricing("claude-haiku-4-5-20251001");
+        assert_eq!(pricing.input, 1.00);
+        assert_eq!(pricing.output, 5.00);
 
         // fallback
-        let (i, o, cc, cr) = get_claude_pricing("some-unknown-model");
-        assert_eq!((i, o, cc, cr), (3.00, 15.00, 3.75, 0.30));
+        let pricing = get_claude_pricing("some-unknown-model");
+        assert_eq!(pricing.input, 3.00);
     }
 }

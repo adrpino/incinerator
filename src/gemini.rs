@@ -10,6 +10,7 @@ use walkdir::WalkDir;
 
 use crate::colors::*;
 use crate::format::{format_float_with_commas, format_int_with_commas};
+use crate::pricing::get_pricing;
 use crate::viz::{TokenStats, print_cost_bar, print_token_bar};
 
 #[derive(Deserialize)]
@@ -44,38 +45,6 @@ pub struct GeminiStats {
     pub monthly_model_usage: BTreeMap<String, HashMap<String, TokenStats>>,
     pub total_messages: usize,
     pub sessions_found: usize,
-}
-
-pub fn get_gemini_pricing(model: &str, input_count: i64) -> (f64, f64, f64) {
-    let m = model.to_lowercase();
-    if m.contains("gemini-3.1-flash-lite") {
-        (0.25, 1.50, 0.025)
-    } else if m.contains("gemini-3-pro") || m.contains("gemini-3.1-pro") {
-        if input_count <= 200_000 {
-            (2.00, 12.00, 0.20)
-        } else {
-            (4.00, 18.00, 0.40)
-        }
-    } else if m.contains("gemini-3-flash") {
-        (0.50, 3.00, 0.05)
-    } else if m.contains("gemini-1.5-pro") || m.contains("gemini-2.5-pro") {
-        if input_count <= 128_000 {
-            (1.25, 5.00, 0.3125)
-        } else {
-            (2.50, 10.00, 0.625)
-        }
-    } else if m.contains("gemini-1.5-flash")
-        || m.contains("gemini-2.0-flash")
-        || m.contains("gemini-2.5-flash")
-    {
-        if input_count <= 128_000 {
-            (0.075, 0.30, 0.01875)
-        } else {
-            (0.15, 0.60, 0.0375)
-        }
-    } else {
-        (1.00, 4.00, 0.10)
-    }
 }
 
 fn estimate_tokens(content: &Option<serde_json::Value>) -> i64 {
@@ -208,10 +177,10 @@ pub fn parse_gemini_file(file_path: &std::path::Path) -> GeminiStats {
         }
 
         let total_context = in_tokens + cache_tokens;
-        let (price_in, price_out, price_cache) = get_gemini_pricing(&msg_model, total_context);
-        let turn_cost = (in_tokens as f64 / 1_000_000.0 * price_in)
-            + (out_tokens as f64 / 1_000_000.0 * price_out)
-            + (cache_tokens as f64 / 1_000_000.0 * price_cache);
+        let pricing = get_pricing(&msg_model, total_context);
+        let turn_cost = (in_tokens as f64 / 1_000_000.0 * pricing.input)
+            + (out_tokens as f64 / 1_000_000.0 * pricing.output)
+            + (cache_tokens as f64 / 1_000_000.0 * pricing.cache_write);
 
         let entry = TokenStats {
             in_tokens,
@@ -292,7 +261,10 @@ pub fn run_gemini_report() -> Option<(GeminiStats, f64)> {
 
 pub fn print_gemini_report(global_stats: &GeminiStats, parsing_time: f64, daily_days: usize) {
     println!("\n{}", "=".repeat(95));
-    println!("{}📊 GEMINI CLI USAGE & COST ESTIMATE{}", TERM_HEADER, TERM_RESET);
+    println!(
+        "{}📊 GEMINI CLI USAGE & COST ESTIMATE{}",
+        TERM_HEADER, TERM_RESET
+    );
     println!("{}", "=".repeat(95));
     println!(
         "{}Sessions Scanned:{} {}",
@@ -307,7 +279,10 @@ pub fn print_gemini_report(global_stats: &GeminiStats, parsing_time: f64, daily_
     println!("{}", "-".repeat(95));
 
     if !global_stats.model_stats.is_empty() {
-        println!("\n{}=== TOKEN USAGE (STACKED) ==={}", TERM_HEADER, TERM_RESET);
+        println!(
+            "\n{}=== TOKEN USAGE (STACKED) ==={}",
+            TERM_HEADER, TERM_RESET
+        );
         println!(
             "Legend: {}█ Input{} | {}█ Output{} | {}▒ Cache Read{}",
             TERM_BLUE, TERM_RESET, TERM_GREEN, TERM_RESET, TERM_YELLOW, TERM_RESET
@@ -320,7 +295,10 @@ pub fn print_gemini_report(global_stats: &GeminiStats, parsing_time: f64, daily_
             .max()
             .unwrap_or(20)
             .min(30);
-        println!("\n{}--- Overall Usage by Model ---{}", TERM_BOLD, TERM_RESET);
+        println!(
+            "\n{}--- Overall Usage by Model ---{}",
+            TERM_BOLD, TERM_RESET
+        );
         let all_max_tokens = global_stats
             .model_stats
             .values()
@@ -343,7 +321,10 @@ pub fn print_gemini_report(global_stats: &GeminiStats, parsing_time: f64, daily_
             );
         }
 
-        println!("\n{}--- Monthly Breakdown by Model ---{}", TERM_BOLD, TERM_RESET);
+        println!(
+            "\n{}--- Monthly Breakdown by Model ---{}",
+            TERM_BOLD, TERM_RESET
+        );
         for (month, models) in global_stats.monthly_model_usage.iter().rev() {
             if month == "Unknown" {
                 continue;
@@ -455,33 +436,33 @@ pub fn print_gemini_report(global_stats: &GeminiStats, parsing_time: f64, daily_
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::pricing::get_gemini_pricing;
 
     #[test]
     fn test_gemini_pricing() {
-        let (in_p, out_p, cache_p) = get_gemini_pricing("gemini-3.1-flash-lite-preview", 0);
-        assert_eq!(in_p, 0.25);
-        assert_eq!(out_p, 1.50);
-        assert_eq!(cache_p, 0.025);
+        let pricing = get_gemini_pricing("gemini-3.1-flash-lite-preview", 0);
+        assert_eq!(pricing.input, 0.25);
+        assert_eq!(pricing.output, 1.50);
+        assert_eq!(pricing.cache_write, 0.025);
 
-        let (in_p, out_p, cache_p) = get_gemini_pricing("gemini-3.1-pro", 100_000);
-        assert_eq!(in_p, 2.00);
-        assert_eq!(out_p, 12.00);
-        assert_eq!(cache_p, 0.20);
+        let pricing = get_gemini_pricing("gemini-3.1-pro", 100_000);
+        assert_eq!(pricing.input, 2.00);
+        assert_eq!(pricing.output, 12.00);
+        assert_eq!(pricing.cache_write, 0.20);
 
-        let (in_p, out_p, cache_p) = get_gemini_pricing("gemini-3.1-pro", 300_000);
-        assert_eq!(in_p, 4.00);
-        assert_eq!(out_p, 18.00);
-        assert_eq!(cache_p, 0.40);
+        let pricing = get_gemini_pricing("gemini-3.1-pro", 300_000);
+        assert_eq!(pricing.input, 4.00);
+        assert_eq!(pricing.output, 18.00);
+        assert_eq!(pricing.cache_write, 0.40);
 
-        let (in_p, out_p, cache_p) = get_gemini_pricing("gemini-3-flash", 0);
-        assert_eq!(in_p, 0.50);
-        assert_eq!(out_p, 3.00);
-        assert_eq!(cache_p, 0.05);
+        let pricing = get_gemini_pricing("gemini-3-flash", 0);
+        assert_eq!(pricing.input, 0.50);
+        assert_eq!(pricing.output, 3.00);
+        assert_eq!(pricing.cache_write, 0.05);
 
-        let (in_p, out_p, cache_p) = get_gemini_pricing("unknown-model", 0);
-        assert_eq!(in_p, 1.00);
-        assert_eq!(out_p, 4.00);
-        assert_eq!(cache_p, 0.10);
+        let pricing = get_gemini_pricing("unknown-model", 0);
+        assert_eq!(pricing.input, 1.00);
+        assert_eq!(pricing.output, 4.00);
+        assert_eq!(pricing.cache_write, 0.10);
     }
 }
