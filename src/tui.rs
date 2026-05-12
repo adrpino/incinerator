@@ -859,9 +859,10 @@ fn run_scan_pass(
     let zed_db_path = get_zed_db_path();
     let n_zed = if zed_db_path.is_some() { 1 } else { 0 };
 
-    progress
-        .total
-        .store((n_cline + n_claude + n_gemini + n_zed) as u32, Ordering::Relaxed);
+    progress.total.store(
+        (n_cline + n_claude + n_gemini + n_zed) as u32,
+        Ordering::Relaxed,
+    );
 
     let mut all_paths: HashSet<PathBuf> = cline_files
         .iter()
@@ -869,7 +870,7 @@ fn run_scan_pass(
         .chain(gemini_files.iter())
         .cloned()
         .collect();
-    
+
     if let Some(ref p) = zed_db_path {
         all_paths.insert(p.clone());
     }

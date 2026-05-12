@@ -6,7 +6,7 @@ use crate::colors::*;
 use crate::format::{format_float_with_commas, format_int_with_commas};
 use crate::gemini::{GeminiStats, run_gemini_report};
 use crate::viz::TokenStats;
-use crate::zed::{run_zed_report, ZedStats};
+use crate::zed::{ZedStats, run_zed_report};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Provider {
@@ -58,10 +58,7 @@ impl UnifiedStats {
         let claude_res = run_claude_report();
         let zed_res = run_zed_report();
 
-        if cline_res.is_none()
-            && gemini_res.is_none()
-            && claude_res.is_none()
-            && zed_res.is_none()
+        if cline_res.is_none() && gemini_res.is_none() && claude_res.is_none() && zed_res.is_none()
         {
             return None;
         }
