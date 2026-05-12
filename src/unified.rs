@@ -6,12 +6,14 @@ use crate::colors::*;
 use crate::format::{format_float_with_commas, format_int_with_commas};
 use crate::gemini::{GeminiStats, run_gemini_report};
 use crate::viz::TokenStats;
+use crate::zed::{run_zed_report, ZedStats};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Provider {
     Cline,
     ClaudeCode,
     GeminiCLI,
+    Zed,
 }
 
 impl std::fmt::Display for Provider {
@@ -20,6 +22,7 @@ impl std::fmt::Display for Provider {
             Provider::Cline => write!(f, "Cline"),
             Provider::ClaudeCode => write!(f, "Claude Code"),
             Provider::GeminiCLI => write!(f, "Gemini CLI"),
+            Provider::Zed => write!(f, "Zed"),
         }
     }
 }
@@ -30,10 +33,12 @@ pub struct UnifiedStats {
     pub daily_costs_cline: BTreeMap<String, f64>,
     pub daily_costs_claude: BTreeMap<String, f64>,
     pub daily_costs_gemini: BTreeMap<String, f64>,
+    pub daily_costs_zed: BTreeMap<String, f64>,
     pub daily_tokens: BTreeMap<String, TokenStats>,
     pub daily_tokens_cline: BTreeMap<String, TokenStats>,
     pub daily_tokens_claude: BTreeMap<String, TokenStats>,
     pub daily_tokens_gemini: BTreeMap<String, TokenStats>,
+    pub daily_tokens_zed: BTreeMap<String, TokenStats>,
     pub monthly_costs: BTreeMap<String, f64>,
     pub monthly_tokens: BTreeMap<String, TokenStats>,
     pub model_stats: HashMap<String, TokenStats>,
@@ -51,8 +56,13 @@ impl UnifiedStats {
         let cline_res = run_cline_report(false, false);
         let gemini_res = run_gemini_report();
         let claude_res = run_claude_report();
+        let zed_res = run_zed_report();
 
-        if cline_res.is_none() && gemini_res.is_none() && claude_res.is_none() {
+        if cline_res.is_none()
+            && gemini_res.is_none()
+            && claude_res.is_none()
+            && zed_res.is_none()
+        {
             return None;
         }
 
@@ -65,6 +75,9 @@ impl UnifiedStats {
         }
         if let Some((s, t)) = claude_res {
             unified.add_claude(s, t);
+        }
+        if let Some((s, t)) = zed_res {
+            unified.add_zed(s, t);
         }
         Some(unified)
     }
@@ -178,6 +191,28 @@ impl UnifiedStats {
         if total.cache_create_tokens > 0 {
             self.show_cache_create = true;
         }
+    }
+
+    pub fn add_zed(&mut self, s: ZedStats, parse_time: f64) {
+        self.merge_costs(&s.daily_costs, &s.monthly_costs);
+        for (k, v) in &s.daily_costs {
+            *self.daily_costs_zed.entry(k.clone()).or_insert(0.0) += v;
+        }
+        self.merge_daily_tokens(&s.daily_stats);
+        for (k, v) in &s.daily_stats {
+            self.daily_tokens_zed.entry(k.clone()).or_default().add(v);
+        }
+        *self.provider_costs.entry(Provider::Zed).or_insert(0.0) += s.total_cost;
+        self.merge_monthly_tokens(&s.monthly_stats);
+        self.merge_model_stats(s.model_stats.clone());
+        let mut total = TokenStats::default();
+        for v in s.model_stats.values() {
+            total.add(v);
+        }
+        self.total_tokens.add(&total);
+        self.total_cost += s.total_cost;
+        self.parse_time += parse_time;
+        self.files_parsed += s.threads_found as u32;
     }
 }
 

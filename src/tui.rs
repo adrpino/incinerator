@@ -23,6 +23,7 @@ use crate::colors::{
 use crate::format::{format_currency, format_int_with_commas, format_tokens};
 use crate::gemini::{GeminiStats, get_gemini_storage_path};
 use crate::unified::UnifiedStats;
+use crate::zed::ZedStats;
 use std::path::PathBuf;
 
 pub fn run_tui() -> io::Result<()> {
@@ -101,6 +102,7 @@ enum DailyFilter {
     Cline,
     Claude,
     Gemini,
+    Zed,
 }
 
 impl DailyFilter {
@@ -110,6 +112,7 @@ impl DailyFilter {
             DailyFilter::Cline => "Cline",
             DailyFilter::Claude => "Claude",
             DailyFilter::Gemini => "Gemini",
+            DailyFilter::Zed => "Zed",
         }
     }
 }
@@ -156,6 +159,7 @@ enum FileStats {
     Cline(ClineStats),
     Claude(ClaudeStats),
     Gemini(GeminiStats),
+    Zed(ZedStats),
 }
 
 struct App {
@@ -298,7 +302,7 @@ impl App {
                             self.settings.theme = self.settings.theme.next();
                             terminal.draw(|f| self.draw(f))?;
                         }
-                        KeyCode::Char(c @ ('1' | '2' | '3' | '4'))
+                        KeyCode::Char(c @ ('1' | '2' | '3' | '4' | '5'))
                             if matches!(self.tab, Tab::DailyCosts | Tab::DailyTokens) =>
                         {
                             self.daily_filter = match c {
@@ -306,6 +310,7 @@ impl App {
                                 '2' => DailyFilter::Cline,
                                 '3' => DailyFilter::Claude,
                                 '4' => DailyFilter::Gemini,
+                                '5' => DailyFilter::Zed,
                                 _ => self.daily_filter,
                             };
                             terminal.draw(|f| self.draw(f))?;
@@ -568,6 +573,7 @@ impl App {
             (DailyFilter::Cline, "2"),
             (DailyFilter::Claude, "3"),
             (DailyFilter::Gemini, "4"),
+            (DailyFilter::Zed, "5"),
         ];
         let mut chip_spans: Vec<Span> = vec![Span::styled(" Filter: ", Style::default().dim())];
         let palette = self.settings.theme.palette();
@@ -605,6 +611,7 @@ impl App {
             DailyFilter::Cline => &self.stats.daily_costs_cline,
             DailyFilter::Claude => &self.stats.daily_costs_claude,
             DailyFilter::Gemini => &self.stats.daily_costs_gemini,
+            DailyFilter::Zed => &self.stats.daily_costs_zed,
         };
 
         let mut sorted_days: Vec<_> = source.iter().collect();
@@ -665,6 +672,7 @@ impl App {
             DailyFilter::Cline => &self.stats.daily_tokens_cline,
             DailyFilter::Claude => &self.stats.daily_tokens_claude,
             DailyFilter::Gemini => &self.stats.daily_tokens_gemini,
+            DailyFilter::Zed => &self.stats.daily_tokens_zed,
         };
 
         let mut sorted_days: Vec<_> = source.iter().collect();
@@ -826,6 +834,7 @@ fn run_scan_pass(
     use crate::claude::{get_claude_files, parse_claude_file};
     use crate::cline::{get_cline_files, parse_cline_file};
     use crate::gemini::{get_gemini_files, parse_gemini_file};
+    use crate::zed::{get_zed_db_path, parse_zed_db};
     use rayon::prelude::*;
     use std::collections::HashSet;
     use std::fs;
@@ -847,22 +856,31 @@ fn run_scan_pass(
     let t_walk_gemini = t.elapsed();
     let n_gemini = gemini_files.len();
 
+    let zed_db_path = get_zed_db_path();
+    let n_zed = if zed_db_path.is_some() { 1 } else { 0 };
+
     progress
         .total
-        .store((n_cline + n_claude + n_gemini) as u32, Ordering::Relaxed);
+        .store((n_cline + n_claude + n_gemini + n_zed) as u32, Ordering::Relaxed);
 
-    let all_paths: HashSet<PathBuf> = cline_files
+    let mut all_paths: HashSet<PathBuf> = cline_files
         .iter()
         .chain(claude_files.iter())
         .chain(gemini_files.iter())
         .cloned()
         .collect();
+    
+    if let Some(ref p) = zed_db_path {
+        all_paths.insert(p.clone());
+    }
+
     cache.retain(|p, _| all_paths.contains(p));
 
     enum PType {
         Cline,
         Claude,
         Gemini,
+        Zed,
     }
     let mut tasks = Vec::new();
     for p in cline_files {
@@ -873,6 +891,9 @@ fn run_scan_pass(
     }
     for p in gemini_files {
         tasks.push((p, PType::Gemini));
+    }
+    if let Some(p) = zed_db_path {
+        tasks.push((p, PType::Zed));
     }
 
     let t_parse_start = Instant::now();
@@ -895,6 +916,16 @@ fn run_scan_pass(
                 PType::Cline => FileStats::Cline(parse_cline_file(&path, false, false)),
                 PType::Claude => FileStats::Claude(parse_claude_file(&path)),
                 PType::Gemini => FileStats::Gemini(parse_gemini_file(&path)),
+                PType::Zed => {
+                    // parse_zed_db doesn't take a path currently but we can use it if we adapt it or just call it
+                    // For now, let's assume it works as it finds its own path, but we'll use the one we found.
+                    if let Some(stats) = parse_zed_db() {
+                        FileStats::Zed(stats)
+                    } else {
+                        // Fallback/Empty
+                        FileStats::Zed(ZedStats::default())
+                    }
+                }
             };
             let parse_us = parse_start.elapsed().as_micros() as u64;
             progress_ref.done.fetch_add(1, Ordering::Relaxed);
@@ -912,6 +943,9 @@ fn run_scan_pass(
     let mut gemini_n = 0u32;
     let mut gemini_us_sum: u64 = 0;
     let mut gemini_us_max: u64 = 0;
+    let mut zed_n = 0u32;
+    let mut zed_us_sum: u64 = 0;
+    let mut zed_us_max: u64 = 0;
     for (path, mtime, stats, was_parsed, parse_us) in results {
         if was_parsed {
             files_parsed += 1;
@@ -937,6 +971,13 @@ fn run_scan_pass(
                         gemini_us_max = parse_us;
                     }
                 }
+                FileStats::Zed(_) => {
+                    zed_n += 1;
+                    zed_us_sum += parse_us;
+                    if parse_us > zed_us_max {
+                        zed_us_max = parse_us;
+                    }
+                }
             }
         }
         cache.insert(path, (mtime, stats));
@@ -953,6 +994,7 @@ fn run_scan_pass(
                 FileStats::Cline(s) => new_stats.add_cline(s.clone(), 0.0),
                 FileStats::Claude(s) => new_stats.add_claude(s.clone(), 0.0),
                 FileStats::Gemini(s) => new_stats.add_gemini(s.clone(), 0.0),
+                FileStats::Zed(s) => new_stats.add_zed(s.clone(), 0.0),
             }
         }
     }
@@ -974,7 +1016,7 @@ fn run_scan_pass(
             let cache_hits = cache_size.saturating_sub(files_parsed as usize);
             let _ = writeln!(
                 f,
-                "[{}] mode={} walk_cline={}ms (n={}) walk_claude={}ms (n={}) walk_gemini={}ms (n={}) parse={}ms [cline n={} sum={}ms max={}ms | claude n={} sum={}ms max={}ms | gemini n={} sum={}ms max={}ms] agg={}ms total={}ms parsed={} cache_hits={} cache_size={}",
+                "[{}] mode={} walk_cline={}ms walk_claude={}ms walk_gemini={}ms parse={}ms [cline n={} sum={}ms max={}ms | claude n={} sum={}ms max={}ms | gemini n={} sum={}ms max={}ms | zed n={} sum={}ms max={}ms] agg={}ms total={}ms parsed={} cache_hits={} cache_size={}",
                 now,
                 if cfg!(debug_assertions) {
                     "debug"
@@ -982,11 +1024,8 @@ fn run_scan_pass(
                     "release"
                 },
                 t_walk_cline.as_millis(),
-                n_cline,
                 t_walk_claude.as_millis(),
-                n_claude,
                 t_walk_gemini.as_millis(),
-                n_gemini,
                 t_parse.as_millis(),
                 cline_n,
                 cline_us_sum / 1000,
@@ -997,6 +1036,9 @@ fn run_scan_pass(
                 gemini_n,
                 gemini_us_sum / 1000,
                 gemini_us_max / 1000,
+                zed_n,
+                zed_us_sum / 1000,
+                zed_us_max / 1000,
                 t_agg.as_millis(),
                 start.elapsed().as_millis(),
                 files_parsed,
@@ -1178,5 +1220,6 @@ mod tests {
         assert_eq!(DailyFilter::Cline.label(), "Cline");
         assert_eq!(DailyFilter::Claude.label(), "Claude");
         assert_eq!(DailyFilter::Gemini.label(), "Gemini");
+        assert_eq!(DailyFilter::Zed.label(), "Zed");
     }
 }

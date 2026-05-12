@@ -20,6 +20,8 @@ clap = { version = "4.5", features = ["derive"] }
 ratatui = "0.30"
 crossterm = "0.28"
 notify = "6.1"
+rusqlite = { version = "0.33", features = ["bundled"] }
+zstd = "0.13"
 
 [profile.release]
 opt-level = "z"     # Optimize for size
