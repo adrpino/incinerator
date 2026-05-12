@@ -110,6 +110,96 @@ pub fn get_deepseek_pricing(model: &str) -> ModelPricing {
     }
 }
 
+pub fn get_openai_pricing(model: &str) -> ModelPricing {
+    let m = model.to_lowercase();
+    if m.contains("gpt-5.5-pro") {
+        ModelPricing {
+            input: 30.00,
+            output: 180.00,
+            cache_write: 0.0,
+            cache_read: 15.00,
+        }
+    } else if m.contains("gpt-5.5") {
+        ModelPricing {
+            input: 5.00,
+            output: 30.00,
+            cache_write: 0.0,
+            cache_read: 0.50,
+        }
+    } else if m.contains("gpt-5.4-mini") {
+        ModelPricing {
+            input: 0.75,
+            output: 4.50,
+            cache_write: 0.0,
+            cache_read: 0.075,
+        }
+    } else if m.contains("gpt-5.4") {
+        ModelPricing {
+            input: 2.50,
+            output: 15.00,
+            cache_write: 0.0,
+            cache_read: 0.25,
+        }
+    } else if m.contains("gpt-5-mini") {
+        ModelPricing {
+            input: 0.15,
+            output: 0.60,
+            cache_write: 0.0,
+            cache_read: 0.015,
+        }
+    } else if m.contains("gpt-5-nano") {
+        ModelPricing {
+            input: 0.05,
+            output: 0.20,
+            cache_write: 0.0,
+            cache_read: 0.005,
+        }
+    } else if m.contains("gpt-5") {
+        ModelPricing {
+            input: 1.25,
+            output: 10.00,
+            cache_write: 0.0,
+            cache_read: 0.125,
+        }
+    } else if m.contains("o1-preview") {
+        ModelPricing {
+            input: 15.00,
+            output: 60.00,
+            cache_write: 0.0,
+            cache_read: 7.50,
+        }
+    } else if m.contains("o1-mini") {
+        ModelPricing {
+            input: 3.00,
+            output: 12.00,
+            cache_write: 0.0,
+            cache_read: 1.50,
+        }
+    } else if m.contains("gpt-4o-mini") {
+        ModelPricing {
+            input: 0.15,
+            output: 0.60,
+            cache_write: 0.0,
+            cache_read: 0.075,
+        }
+    } else if m.contains("gpt-4o") {
+        ModelPricing {
+            input: 2.50,
+            output: 10.00,
+            cache_write: 0.0,
+            cache_read: 1.25,
+        }
+    } else {
+        // Fallback for unknown OpenAI
+        ModelPricing {
+            input: 2.50,
+            output: 10.00,
+            cache_write: 0.0,
+            cache_read: 1.25,
+        }
+    }
+}
+
 pub fn get_pricing(model: &str, input_count: i64) -> ModelPricing {
     let m = model.to_lowercase();
     if m.contains("claude") {
@@ -118,14 +208,20 @@ pub fn get_pricing(model: &str, input_count: i64) -> ModelPricing {
         get_gemini_pricing(model, input_count)
     } else if m.contains("deepseek") {
         get_deepseek_pricing(model)
+    } else if m.contains("gpt-") || m.contains("o1-") {
+        get_openai_pricing(model)
     } else {
-        // Try deepseek then gemini then claude (which has fallback)
+        // Try deepseek then gemini then openai then claude
         let p = get_deepseek_pricing(model);
         if p.input > 0.0 {
             return p;
         }
         let p = get_gemini_pricing(model, input_count);
         if p.input != 1.0 || m.contains("gemini") {
+            return p;
+        }
+        let p = get_openai_pricing(model);
+        if p.input != 2.5 || m.contains("gpt") {
             return p;
         }
         get_claude_pricing(model)
@@ -146,6 +242,43 @@ mod tests {
 
         let p = get_pricing("deepseek/deepseek-v4-flash", 0);
         assert_eq!(p.input, 0.14);
+
+        let p = get_pricing("gpt-4o", 0);
+        assert_eq!(p.input, 2.50);
+
+        let p = get_pricing("gpt-5", 0);
+        assert_eq!(p.input, 1.25);
+    }
+
+    #[test]
+    fn test_openai_pricing_logic() {
+        let p = get_openai_pricing("gpt-4o");
+        assert_eq!(p.input, 2.50);
+        assert_eq!(p.output, 10.00);
+        assert_eq!(p.cache_read, 1.25);
+
+        let p = get_openai_pricing("gpt-5");
+        assert_eq!(p.input, 1.25);
+        assert_eq!(p.output, 10.00);
+
+        let p = get_openai_pricing("gpt-5.5");
+        assert_eq!(p.input, 5.00);
+        assert_eq!(p.output, 30.00);
+        assert_eq!(p.cache_read, 0.50);
+
+        let p = get_openai_pricing("gpt-5.4");
+        assert_eq!(p.input, 2.50);
+        assert_eq!(p.output, 15.00);
+        assert_eq!(p.cache_read, 0.25);
+
+        let p = get_openai_pricing("gpt-5.4-mini");
+        assert_eq!(p.input, 0.75);
+        assert_eq!(p.output, 4.50);
+        assert_eq!(p.cache_read, 0.075);
+
+        let p = get_openai_pricing("gpt-5.5-pro");
+        assert_eq!(p.input, 30.00);
+        assert_eq!(p.output, 180.00);
     }
 
     #[test]

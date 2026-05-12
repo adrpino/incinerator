@@ -9,6 +9,7 @@ mod pricing;
 mod tui;
 mod unified;
 mod viz;
+mod zed;
 
 use clap::{Parser, Subcommand};
 
@@ -57,6 +58,12 @@ enum Commands {
         #[arg(long)]
         daily: Option<usize>,
     },
+    /// Analyze Zed Editor thread logs
+    Zed {
+        /// Number of days to show in the daily costs chart
+        #[arg(long)]
+        daily: Option<usize>,
+    },
     /// Launch interactive TUI (default when no command given)
     Tui,
 }
@@ -91,6 +98,12 @@ fn main() {
             let days = daily.unwrap_or(default_daily);
             if let Some((stats, time)) = gemini::run_gemini_report() {
                 gemini::print_gemini_report(&stats, time, days);
+            }
+        }
+        Some(Commands::Zed { daily }) => {
+            let days = daily.unwrap_or(default_daily);
+            if let Some((stats, time)) = zed::run_zed_report() {
+                zed::print_zed_report(&stats, time, days);
             }
         }
         Some(Commands::Tui) => {
