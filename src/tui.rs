@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Bar, BarChart, BarGroup, Block, Borders, Paragraph, Tabs, Wrap},
+    widgets::{Bar, BarChart, BarGroup, Block, Borders, Paragraph, Tabs},
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -415,10 +415,15 @@ impl App {
     }
 
     fn draw_summary(&self, f: &mut Frame, area: Rect) {
-        let chunks = Layout::default()
+        let main_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(13), Constraint::Min(0)])
+            .split(area);
+
+        let top_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(area);
+            .split(main_chunks[0]);
 
         // Left: Totals
         let total_tokens = self.stats.total_tokens.total();
@@ -456,7 +461,7 @@ impl App {
             self.settings.heat_effects,
         );
 
-        let text = vec![
+        let totals_text = vec![
             Line::from(vec![
                 Span::raw("Total Cost:   "),
                 Span::styled(
@@ -499,46 +504,35 @@ impl App {
                     Style::default().fg(palette.secondary),
                 ),
             ]),
-            Line::from(""),
         ];
 
-        let mut text = text;
-        text.extend(format_eco_metrics(total_tokens as u64, palette.cost));
+        let totals = Paragraph::new(totals_text).block(
+            Block::default()
+                .title(" Grand Totals ")
+                .borders(Borders::ALL)
+                .padding(ratatui::widgets::Padding::horizontal(1)),
+        );
+        f.render_widget(totals, top_chunks[0]);
 
-        let totals = Paragraph::new(text)
-            .block(
-                Block::default()
-                    .title(" Grand Totals ")
-                    .borders(Borders::ALL),
-            )
-            .wrap(Wrap { trim: true });
-        f.render_widget(totals, chunks[0]);
+        // Right: Eco Impact
+        let eco_width = top_chunks[1].width.saturating_sub(4) as usize;
+        let eco_text = format_eco_metrics(total_tokens as u64, palette.cost, eco_width);
+        let eco_paragraph = Paragraph::new(eco_text).block(
+            Block::default()
+                .title(" Eco Impact ")
+                .borders(Borders::ALL)
+                .padding(ratatui::widgets::Padding::horizontal(1)),
+        );
+        f.render_widget(eco_paragraph, top_chunks[1]);
 
-        // Right: Model Stats (Top 10)
-        let mut sorted_models: Vec<_> = self.stats.model_stats.iter().collect();
-        sorted_models.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
-
-        let model_bars: Vec<Bar> = sorted_models
-            .iter()
-            .take(10)
-            .map(|(name, stats)| {
-                Bar::default()
-                    .value(stats.total() as u64)
-                    .label(Line::from((*name).clone()))
-                    .text_value(format_tokens(stats.total()))
-                    .style(Style::default().fg(palette.secondary))
-            })
-            .collect();
-
-        let barchart = BarChart::default()
-            .block(
-                Block::default()
-                    .title(" Top Models (Tokens) ")
-                    .borders(Borders::ALL),
-            )
-            .data(BarGroup::default().bars(&model_bars))
-            .bar_width(12);
-        f.render_widget(barchart, chunks[1]);
+        // Bottom: Daily Burn Chart
+        self.render_daily_chart(
+            f,
+            main_chunks[1],
+            &self.stats.daily_costs,
+            " Daily Burn (USD) - All Providers ",
+            None,
+        );
     }
 
     fn draw_providers(&self, f: &mut Frame, area: Rect) {
@@ -621,23 +615,38 @@ impl App {
             DailyFilter::Zed => &self.stats.daily_costs_zed,
         };
 
-        let mut sorted_days: Vec<_> = source.iter().collect();
+        let title = format!(" Daily Burn (USD) — {} ", self.daily_filter.label());
+        self.render_daily_chart(f, chunks[1], source, &title, Some(self.daily_filter));
+    }
+
+    fn render_daily_chart<'a, I>(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        source: I,
+        title: &str,
+        filter: Option<DailyFilter>,
+    ) where
+        I: IntoIterator<Item = (&'a String, &'a f64)>,
+    {
+        let mut sorted_days: Vec<_> = source.into_iter().collect();
         sorted_days.sort_by(|a, b| a.0.cmp(b.0));
 
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let mut tracker = self.tracker.borrow_mut();
         let palette = self.settings.theme.palette();
 
-        let title = format!(" Daily Burn (USD) — {} ", self.daily_filter.label());
-        let chart_area = chunks[1];
-
         let daily_bars: Vec<Bar> = sorted_days
             .iter()
             .rev()
-            .take(chart_area.width as usize / 10)
+            .take(area.width as usize / 10)
             .rev()
             .map(|(day, cost)| {
-                let id = format!("daily_cost_{:?}_{}", self.daily_filter, day);
+                let id = if let Some(f) = filter {
+                    format!("daily_cost_{:?}_{}", f, day)
+                } else {
+                    format!("daily_cost_summary_{}", day)
+                };
                 let is_today = **day == today;
                 let style = tracker.get_style(
                     &id,
@@ -661,7 +670,7 @@ impl App {
             .data(BarGroup::default().bars(&daily_bars))
             .bar_width(8)
             .bar_gap(1);
-        f.render_widget(barchart, chart_area);
+        f.render_widget(barchart, area);
     }
 
     fn draw_daily_tokens(&self, f: &mut Frame, area: Rect) {

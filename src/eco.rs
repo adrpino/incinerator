@@ -1,3 +1,4 @@
+use crate::format::format_int_with_commas;
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -173,8 +174,8 @@ pub fn find_top_mappings(total_wh: f64, limit: usize) -> Vec<(&'static EcoMappin
         .collect()
 }
 
-pub fn format_eco_metrics(total_tokens: u64, color: Color) -> Vec<Line<'static>> {
-    if total_tokens == 0 {
+pub fn format_eco_metrics(total_tokens: u64, color: Color, width: usize) -> Vec<Line<'static>> {
+    if total_tokens == 0 || width < 10 {
         return Vec::new();
     }
 
@@ -206,19 +207,68 @@ pub fn format_eco_metrics(total_tokens: u64, color: Color) -> Vec<Line<'static>>
         };
 
         let units_display = if final_units == final_units.round() {
-            format!("{}", final_units as u64)
+            format_int_with_commas(final_units as i64)
         } else {
-            format!("{:.1}", final_units)
+            let int_part = final_units.trunc() as i64;
+            let frac_part = (final_units.fract() * 10.0).round().abs() as i64;
+            format!("{}.{}", format_int_with_commas(int_part), frac_part)
         };
 
-        lines.push(Line::from(vec![
-            Span::raw(format!(" • {} ", icon)),
-            Span::styled(
-                format!("{} {}", units_display, final_unit_str),
-                Style::default().fg(color),
-            ),
-            Span::raw(format!(" from a {}", mapping.name)),
-        ]));
+        let prefix = format!(" • {} ", icon);
+        let prefix_width = 5; // " • " (3) + icon (1) + " " (1)
+        let main_text = format!("{} {}", units_display, final_unit_str);
+        let suffix = format!(" from a {}", mapping.name);
+
+        let full_text = format!("{}{}{}", prefix, main_text, suffix);
+
+        if full_text.chars().count() <= width {
+            lines.push(Line::from(vec![
+                Span::raw(prefix),
+                Span::styled(main_text, Style::default().fg(color)),
+                Span::raw(suffix),
+            ]));
+            continue;
+        }
+
+        // Manual wrapping for long lines
+        let wrapped = wrap_with_hanging_indent(&full_text, width, prefix_width);
+        lines.extend(wrapped.into_iter().map(Line::from));
+    }
+
+    lines
+}
+
+fn wrap_with_hanging_indent(text: &str, width: usize, indent: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current_line = String::new();
+    let mut first_word_on_line = true;
+
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        let space_needed = if first_word_on_line { 0 } else { 1 };
+        let current_len = current_line.chars().count();
+
+        if !first_word_on_line && current_len + space_needed + word_len > width {
+            lines.push(current_line);
+            current_line = " ".repeat(indent);
+            current_line.push_str(word);
+            first_word_on_line = false; // It's not the first word of the line's *storage*, but it is the first of its *content*
+        } else {
+            if !first_word_on_line {
+                current_line.push(' ');
+            }
+            current_line.push_str(word);
+            first_word_on_line = false;
+        }
+    }
+
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
+
+    // Restore leading space for bullet point style consistency if it was in the original
+    if !lines.is_empty() && text.starts_with(' ') && !lines[0].starts_with(' ') {
+        lines[0] = format!(" {}", lines[0]);
     }
 
     lines
@@ -254,7 +304,7 @@ mod tests {
         // 10,000 > 9999, so it should scale to days: 10,000 / 24 = 416.7 days.
         let wh = 1_000_000.0;
         let tokens = (wh / 300.0) * 1_000_000.0;
-        let lines = format_eco_metrics(tokens as u64, Color::Red);
+        let lines = format_eco_metrics(tokens as u64, Color::Red, 100);
 
         // Find the "Modern TV" line if it exists in top 2
         let tv_line = lines.iter().find(|l| l.to_string().contains("Modern TV"));
@@ -265,14 +315,57 @@ mod tests {
 
     #[test]
     fn test_format_eco_metrics() {
-        let lines = format_eco_metrics(1_000_000, Color::Red);
+        let lines = format_eco_metrics(1_000_000, Color::Red, 100);
         assert_eq!(lines.len(), 3); // "Eco Impact:" + 2 bullets
         assert_eq!(lines[0].spans[0].content, "Eco Impact:");
     }
 
     #[test]
     fn test_format_eco_metrics_zero() {
-        let lines = format_eco_metrics(0, Color::Red);
+        let lines = format_eco_metrics(0, Color::Red, 100);
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn test_format_eco_metrics_thousand_separator() {
+        // 100,000,000 tokens = 30,000Wh.
+        // 30,000Wh / 10Wh (E-Bike) = 3,000 units.
+        let lines = format_eco_metrics(100_000_000, Color::Red, 100);
+        let ebike_line = lines.iter().find(|l| l.to_string().contains("E-Bike"));
+        if let Some(line) = ebike_line {
+            assert!(line.to_string().contains("3,000"));
+        }
+    }
+
+    #[test]
+    fn test_wrap_with_hanging_indent() {
+        let text = " • 🚗 3,000 kilometers driven from a Electric Car (EV)";
+        let width = 25; // slightly wider to see better wrap
+        let indent = 5;
+        let wrapped = wrap_with_hanging_indent(text, width, indent);
+
+        assert_eq!(wrapped[0], " • 🚗 3,000 kilometers");
+        assert_eq!(wrapped[1], "     driven from a");
+        assert_eq!(wrapped[2], "     Electric Car (EV)");
+
+        // Test with no wrapping needed
+        let wrapped_no_wrap = wrap_with_hanging_indent("short text", 20, 5);
+        assert_eq!(wrapped_no_wrap.len(), 1);
+        assert_eq!(wrapped_no_wrap[0], "short text");
+
+        // Test with very narrow width
+        let wrapped_narrow = wrap_with_hanging_indent("word", 2, 1);
+        assert_eq!(wrapped_narrow.len(), 1);
+        assert_eq!(wrapped_narrow[0], "word"); // words themselves aren't broken
+    }
+
+    #[test]
+    fn test_format_eco_metrics_wrapping() {
+        // Use a very narrow width to force wrapping
+        let lines = format_eco_metrics(1_000_000, Color::Red, 20);
+        // Should have more than 3 lines now
+        assert!(lines.len() > 3);
+        // Second line of a bullet should start with spaces
+        assert!(lines[2].to_string().starts_with("     "));
     }
 }
