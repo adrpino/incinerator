@@ -427,84 +427,87 @@ impl App {
 
         // Left: Totals
         let total_tokens = self.stats.total_tokens.total();
-        let mut tracker = self.tracker.borrow_mut();
         let palette = self.settings.theme.palette();
 
-        let cost_style = tracker.get_style(
-            "total_cost",
-            self.stats.total_cost,
-            palette.cost,
-            self.settings.heat_effects,
-        );
-        let token_style = tracker.get_style(
-            "total_tokens",
-            total_tokens as f64,
-            TUI_WHITE,
-            self.settings.heat_effects,
-        );
-        let in_style = tracker.get_style(
-            "in_tokens",
-            self.stats.total_tokens.in_tokens as f64,
-            palette.input,
-            self.settings.heat_effects,
-        );
-        let out_style = tracker.get_style(
-            "out_tokens",
-            self.stats.total_tokens.out_tokens as f64,
-            palette.output,
-            self.settings.heat_effects,
-        );
-        let cache_style = tracker.get_style(
-            "cache_tokens",
-            self.stats.total_tokens.cache_read_tokens as f64,
-            palette.cache_read,
-            self.settings.heat_effects,
-        );
+        let totals_text = {
+            let mut tracker = self.tracker.borrow_mut();
 
-        let totals_text = vec![
-            Line::from(vec![
-                Span::raw("Total Cost:   "),
-                Span::styled(
-                    format_currency(self.stats.total_cost),
-                    cost_style.add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(""),
-            Line::from(vec![
-                Span::raw("Total Tokens: "),
-                Span::styled(
-                    format_tokens(total_tokens),
-                    token_style.add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(" ({})", format_int_with_commas(total_tokens)),
-                    Style::default().dim(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::raw("  Input:      "),
-                Span::styled(format_tokens(self.stats.total_tokens.in_tokens), in_style),
-            ]),
-            Line::from(vec![
-                Span::raw("  Output:     "),
-                Span::styled(format_tokens(self.stats.total_tokens.out_tokens), out_style),
-            ]),
-            Line::from(vec![
-                Span::raw("  Cache Read: "),
-                Span::styled(
-                    format_tokens(self.stats.total_tokens.cache_read_tokens),
-                    cache_style,
-                ),
-            ]),
-            Line::from(""),
-            Line::from(vec![
-                Span::raw("Files Scanned: "),
-                Span::styled(
-                    format_int_with_commas(self.stats.files_parsed as i64),
-                    Style::default().fg(palette.secondary),
-                ),
-            ]),
-        ];
+            let cost_style = tracker.get_style(
+                "total_cost",
+                self.stats.total_cost,
+                palette.cost,
+                self.settings.heat_effects,
+            );
+            let token_style = tracker.get_style(
+                "total_tokens",
+                total_tokens as f64,
+                TUI_WHITE,
+                self.settings.heat_effects,
+            );
+            let in_style = tracker.get_style(
+                "in_tokens",
+                self.stats.total_tokens.in_tokens as f64,
+                palette.input,
+                self.settings.heat_effects,
+            );
+            let out_style = tracker.get_style(
+                "out_tokens",
+                self.stats.total_tokens.out_tokens as f64,
+                palette.output,
+                self.settings.heat_effects,
+            );
+            let cache_style = tracker.get_style(
+                "cache_tokens",
+                self.stats.total_tokens.cache_read_tokens as f64,
+                palette.cache_read,
+                self.settings.heat_effects,
+            );
+
+            vec![
+                Line::from(vec![
+                    Span::raw("Total Cost:   "),
+                    Span::styled(
+                        format_currency(self.stats.total_cost),
+                        cost_style.add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::raw("Total Tokens: "),
+                    Span::styled(
+                        format_tokens(total_tokens),
+                        token_style.add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(" ({})", format_int_with_commas(total_tokens)),
+                        Style::default().dim(),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::raw("  Input:      "),
+                    Span::styled(format_tokens(self.stats.total_tokens.in_tokens), in_style),
+                ]),
+                Line::from(vec![
+                    Span::raw("  Output:     "),
+                    Span::styled(format_tokens(self.stats.total_tokens.out_tokens), out_style),
+                ]),
+                Line::from(vec![
+                    Span::raw("  Cache Read: "),
+                    Span::styled(
+                        format_tokens(self.stats.total_tokens.cache_read_tokens),
+                        cache_style,
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::raw("Files Scanned: "),
+                    Span::styled(
+                        format_int_with_commas(self.stats.files_parsed as i64),
+                        Style::default().fg(palette.secondary),
+                    ),
+                ]),
+            ]
+        };
 
         let totals = Paragraph::new(totals_text).block(
             Block::default()
