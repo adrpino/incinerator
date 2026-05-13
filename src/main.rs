@@ -3,6 +3,7 @@
 mod claude;
 mod cline;
 mod colors;
+mod eco;
 mod format;
 mod gemini;
 mod pricing;

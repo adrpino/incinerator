@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Bar, BarChart, BarGroup, Block, Borders, Paragraph, Tabs},
+    widgets::{Bar, BarChart, BarGroup, Block, Borders, Paragraph, Tabs, Wrap},
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -20,6 +20,7 @@ use crate::colors::{
     TUI_CYAN, TUI_DARK_GRAY, TUI_FLAME_ORANGE_1, TUI_FLAME_ORANGE_2, TUI_FLAME_RED_1,
     TUI_FLAME_YELLOW_2, TUI_ORANGE_601, TUI_RED, TUI_WHITE, TUI_YELLOW, ThemeType,
 };
+use crate::eco::format_eco_metrics;
 use crate::format::{format_currency, format_int_with_commas, format_tokens};
 use crate::gemini::{GeminiStats, get_gemini_storage_path};
 use crate::unified::UnifiedStats;
@@ -498,13 +499,19 @@ impl App {
                     Style::default().fg(palette.secondary),
                 ),
             ]),
+            Line::from(""),
         ];
 
-        let totals = Paragraph::new(text).block(
-            Block::default()
-                .title(" Grand Totals ")
-                .borders(Borders::ALL),
-        );
+        let mut text = text;
+        text.extend(format_eco_metrics(total_tokens as u64, palette.cost));
+
+        let totals = Paragraph::new(text)
+            .block(
+                Block::default()
+                    .title(" Grand Totals ")
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: true });
         f.render_widget(totals, chunks[0]);
 
         // Right: Model Stats (Top 10)
