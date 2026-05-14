@@ -167,11 +167,20 @@ pub fn find_top_mappings(total_wh: f64, limit: usize) -> Vec<(&'static EcoMappin
     // Sort by smallest difference (closest to integer)
     scored_mappings.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
 
-    scored_mappings
-        .into_iter()
-        .take(limit)
-        .map(|(m, r, _)| (m, r))
-        .collect()
+    let mut results = Vec::new();
+    let mut seen_units = std::collections::HashSet::new();
+
+    for (m, r, _) in scored_mappings {
+        if !seen_units.contains(&r) {
+            results.push((m, r));
+            seen_units.insert(r);
+        }
+        if results.len() >= limit {
+            break;
+        }
+    }
+
+    results
 }
 
 pub fn format_eco_metrics(total_tokens: u64, color: Color, width: usize) -> Vec<Line<'static>> {
@@ -186,7 +195,7 @@ pub fn format_eco_metrics(total_tokens: u64, color: Color, width: usize) -> Vec<
         return Vec::new();
     }
 
-    let mut lines = vec![Line::from("Eco Impact:")];
+    let mut lines = Vec::new();
 
     for (mapping, units) in top_mappings {
         let icon = match mapping.category {
@@ -316,14 +325,34 @@ mod tests {
     #[test]
     fn test_format_eco_metrics() {
         let lines = format_eco_metrics(1_000_000, Color::Red, 100);
-        assert_eq!(lines.len(), 3); // "Eco Impact:" + 2 bullets
-        assert_eq!(lines[0].spans[0].content, "Eco Impact:");
+        assert_eq!(lines.len(), 2); // 2 bullets, no header
     }
 
     #[test]
     fn test_format_eco_metrics_zero() {
         let lines = format_eco_metrics(0, Color::Red, 100);
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn test_find_top_mappings_deduplication() {
+        // If we have a watt-hour value that would result in the same unit count for two mappings,
+        // we should only see one of them.
+        // e.g., Espresso Machine and Smartphone both cost 10-15Wh (depending on exact mapping)
+        // Let's use a very low Wh like 15.0.
+        // Smartphone = 1 unit, Espresso = 1.5 -> 2 units.
+        // If we had two identical cost mappings, we'd only see one.
+        let wh = 10.0;
+        let top = find_top_mappings(wh, 10);
+
+        let mut seen_units = std::collections::HashSet::new();
+        for (_, units) in top {
+            assert!(
+                seen_units.insert(units),
+                "Duplicate unit count {} found",
+                units
+            );
+        }
     }
 
     #[test]
