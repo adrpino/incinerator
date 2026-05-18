@@ -266,7 +266,7 @@ pub fn print_zed_report(stats: &ZedStats, duration: f64, daily_days: usize) {
         .max()
         .unwrap_or(0);
     let mut sorted_models: Vec<_> = stats.model_stats.iter().collect();
-    sorted_models.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
+    sorted_models.sort_by_key(|b| std::cmp::Reverse(b.1.total()));
     for (model, s) in sorted_models {
         print_token_bar(
             &format!("{:<30}", model.get(..30).unwrap_or(model)),

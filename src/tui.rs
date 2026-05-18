@@ -46,6 +46,7 @@ struct ScanProgress {
 enum Tab {
     Summary,
     Providers,
+    MonthlyCosts,
     DailyCosts,
     DailyTokens,
     Settings,
@@ -55,7 +56,8 @@ impl Tab {
     fn next(self) -> Self {
         match self {
             Tab::Summary => Tab::Providers,
-            Tab::Providers => Tab::DailyCosts,
+            Tab::Providers => Tab::MonthlyCosts,
+            Tab::MonthlyCosts => Tab::DailyCosts,
             Tab::DailyCosts => Tab::DailyTokens,
             Tab::DailyTokens => Tab::Settings,
             Tab::Settings => Tab::Summary,
@@ -66,7 +68,8 @@ impl Tab {
         match self {
             Tab::Summary => Tab::Settings,
             Tab::Providers => Tab::Summary,
-            Tab::DailyCosts => Tab::Providers,
+            Tab::MonthlyCosts => Tab::Providers,
+            Tab::DailyCosts => Tab::MonthlyCosts,
             Tab::DailyTokens => Tab::DailyCosts,
             Tab::Settings => Tab::DailyTokens,
         }
@@ -304,7 +307,10 @@ impl App {
                             terminal.draw(|f| self.draw(f))?;
                         }
                         KeyCode::Char(c @ ('1' | '2' | '3' | '4' | '5'))
-                            if matches!(self.tab, Tab::DailyCosts | Tab::DailyTokens) =>
+                            if matches!(
+                                self.tab,
+                                Tab::MonthlyCosts | Tab::DailyCosts | Tab::DailyTokens
+                            ) =>
                         {
                             self.daily_filter = match c {
                                 '1' => DailyFilter::All,
@@ -357,6 +363,7 @@ impl App {
         let titles = vec![
             " Summary ",
             " Providers ",
+            " Monthly Costs ",
             " Daily Costs ",
             " Daily Tokens ",
             " Settings ",
@@ -374,6 +381,7 @@ impl App {
         match self.tab {
             Tab::Summary => self.draw_summary(f, chunks[1]),
             Tab::Providers => self.draw_providers(f, chunks[1]),
+            Tab::MonthlyCosts => self.draw_monthly_costs(f, chunks[1]),
             Tab::DailyCosts => self.draw_daily_costs(f, chunks[1]),
             Tab::DailyTokens => self.draw_daily_tokens(f, chunks[1]),
             Tab::Settings => self.draw_settings(f, chunks[1]),
@@ -529,12 +537,13 @@ impl App {
         f.render_widget(eco_paragraph, top_chunks[1]);
 
         // Bottom: Daily Burn Chart
-        self.render_daily_chart(
+        self.render_time_series_chart(
             f,
             main_chunks[1],
             &self.stats.daily_costs,
             " Daily Burn (USD) - All Providers ",
             None,
+            false,
         );
     }
 
@@ -601,6 +610,26 @@ impl App {
         f.render_widget(Paragraph::new(Line::from(chip_spans)), area);
     }
 
+    fn draw_monthly_costs(&self, f: &mut Frame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
+
+        self.render_filter_chips(f, chunks[0]);
+
+        let source = match self.daily_filter {
+            DailyFilter::All => &self.stats.monthly_costs,
+            DailyFilter::Cline => &self.stats.monthly_costs_cline,
+            DailyFilter::Claude => &self.stats.monthly_costs_claude,
+            DailyFilter::Gemini => &self.stats.monthly_costs_gemini,
+            DailyFilter::Zed => &self.stats.monthly_costs_zed,
+        };
+
+        let title = format!(" Monthly Burn (USD) — {} ", self.daily_filter.label());
+        self.render_time_series_chart(f, chunks[1], source, &title, Some(self.daily_filter), true);
+    }
+
     fn draw_daily_costs(&self, f: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -619,50 +648,73 @@ impl App {
         };
 
         let title = format!(" Daily Burn (USD) — {} ", self.daily_filter.label());
-        self.render_daily_chart(f, chunks[1], source, &title, Some(self.daily_filter));
+        self.render_time_series_chart(f, chunks[1], source, &title, Some(self.daily_filter), false);
     }
 
-    fn render_daily_chart<'a, I>(
+    fn render_time_series_chart<'a, I>(
         &self,
         f: &mut Frame,
         area: Rect,
         source: I,
         title: &str,
         filter: Option<DailyFilter>,
+        is_monthly: bool,
     ) where
         I: IntoIterator<Item = (&'a String, &'a f64)>,
     {
-        let mut sorted_days: Vec<_> = source.into_iter().collect();
-        sorted_days.sort_by(|a, b| a.0.cmp(b.0));
+        let mut sorted_time_points: Vec<_> = source.into_iter().collect();
+        sorted_time_points.sort_by_key(|a| a.0);
 
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let current_time_point = if is_monthly {
+            chrono::Local::now().format("%Y-%m").to_string()
+        } else {
+            chrono::Local::now().format("%Y-%m-%d").to_string()
+        };
+
         let mut tracker = self.tracker.borrow_mut();
         let palette = self.settings.theme.palette();
 
-        let daily_bars: Vec<Bar> = sorted_days
+        let bar_width = if is_monthly { 12 } else { 8 };
+        let gap = 1;
+        let points_to_take = (area.width as usize) / (bar_width + gap);
+
+        let bars: Vec<Bar> = sorted_time_points
             .iter()
             .rev()
-            .take(area.width as usize / 10)
+            .take(points_to_take)
             .rev()
-            .map(|(day, cost)| {
+            .map(|(point, cost)| {
                 let id = if let Some(f) = filter {
-                    format!("daily_cost_{:?}_{}", f, day)
+                    format!(
+                        "ts_{:?}_{}_{}",
+                        f,
+                        if is_monthly { "m" } else { "d" },
+                        point
+                    )
                 } else {
-                    format!("daily_cost_summary_{}", day)
+                    format!(
+                        "ts_summary_{}_{}",
+                        if is_monthly { "m" } else { "d" },
+                        point
+                    )
                 };
-                let is_today = **day == today;
+                let is_current = **point == current_time_point;
                 let style = tracker.get_style(
                     &id,
                     **cost,
                     palette.cost,
-                    self.settings.heat_effects && is_today,
+                    self.settings.heat_effects && is_current,
                 );
+
+                let label = if is_monthly {
+                    point.to_string()
+                } else {
+                    point.split('-').next_back().unwrap_or("").to_string()
+                };
 
                 Bar::default()
                     .value((**cost * 100.0) as u64)
-                    .label(Line::from(
-                        day.split('-').next_back().unwrap_or("").to_string(),
-                    ))
+                    .label(Line::from(label))
                     .text_value(format_currency(**cost))
                     .style(style)
             })
@@ -670,9 +722,9 @@ impl App {
 
         let barchart = BarChart::default()
             .block(Block::default().title(title).borders(Borders::ALL))
-            .data(BarGroup::default().bars(&daily_bars))
-            .bar_width(8)
-            .bar_gap(1);
+            .data(BarGroup::default().bars(&bars))
+            .bar_width(bar_width as u16)
+            .bar_gap(gap as u16);
         f.render_widget(barchart, area);
     }
 
@@ -695,7 +747,7 @@ impl App {
         };
 
         let mut sorted_days: Vec<_> = source.iter().collect();
-        sorted_days.sort_by(|a, b| a.0.cmp(b.0));
+        sorted_days.sort_by_key(|a| a.0);
 
         // How many days fit? One line per day + block padding
         let num_days = (area.height as usize).saturating_sub(4).max(1);
@@ -1018,6 +1070,7 @@ fn run_scan_pass(
             }
         }
     }
+    new_stats.pad_missing_dates();
     let t_agg = t_agg_start.elapsed();
 
     new_stats.parse_time = start.elapsed().as_secs_f64();
@@ -1186,6 +1239,7 @@ mod tests {
         let order = [
             Tab::Summary,
             Tab::Providers,
+            Tab::MonthlyCosts,
             Tab::DailyCosts,
             Tab::DailyTokens,
             Tab::Settings,
@@ -1201,6 +1255,7 @@ mod tests {
         let order = [
             Tab::Summary,
             Tab::Providers,
+            Tab::MonthlyCosts,
             Tab::DailyCosts,
             Tab::DailyTokens,
             Tab::Settings,
@@ -1216,6 +1271,7 @@ mod tests {
         for t in [
             Tab::Summary,
             Tab::Providers,
+            Tab::MonthlyCosts,
             Tab::DailyCosts,
             Tab::DailyTokens,
             Tab::Settings,
@@ -1229,9 +1285,10 @@ mod tests {
     fn tab_index_is_stable_and_distinct() {
         assert_eq!(Tab::Summary.index(), 0);
         assert_eq!(Tab::Providers.index(), 1);
-        assert_eq!(Tab::DailyCosts.index(), 2);
-        assert_eq!(Tab::DailyTokens.index(), 3);
-        assert_eq!(Tab::Settings.index(), 4);
+        assert_eq!(Tab::MonthlyCosts.index(), 2);
+        assert_eq!(Tab::DailyCosts.index(), 3);
+        assert_eq!(Tab::DailyTokens.index(), 4);
+        assert_eq!(Tab::Settings.index(), 5);
     }
 
     #[test]

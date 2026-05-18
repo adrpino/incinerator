@@ -328,7 +328,7 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
         for (month, models) in &global_stats.monthly_model_tokens {
             println!("{}{}{}:", TERM_CYAN, month, TERM_RESET);
             let mut sorted_models: Vec<_> = models.iter().collect();
-            sorted_models.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
+            sorted_models.sort_by_key(|b| std::cmp::Reverse(b.1.total()));
             for (model, stats) in sorted_models {
                 print_token_bar(
                     &format!("  {:<35}", model),
@@ -346,7 +346,7 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
         TERM_BOLD, daily_days, TERM_RESET
     );
     let mut sorted_days: Vec<_> = global_stats.daily_tokens.iter().collect();
-    sorted_days.sort_by(|a, b| a.0.cmp(b.0));
+    sorted_days.sort_by_key(|a| a.0);
     let last_n_days: Vec<_> = sorted_days.into_iter().rev().take(daily_days).collect();
     let last_n_days: Vec<_> = last_n_days.into_iter().rev().collect();
 
@@ -366,7 +366,7 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
         TERM_BOLD, daily_days, TERM_RESET
     );
     let mut sorted_days_cost: Vec<_> = global_stats.daily_costs.iter().collect();
-    sorted_days_cost.sort_by(|a, b| a.0.cmp(b.0));
+    sorted_days_cost.sort_by_key(|a| a.0);
     let last_n_days_cost: Vec<_> = sorted_days_cost
         .into_iter()
         .rev()

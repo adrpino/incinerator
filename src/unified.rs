@@ -40,6 +40,10 @@ pub struct UnifiedStats {
     pub daily_tokens_gemini: BTreeMap<String, TokenStats>,
     pub daily_tokens_zed: BTreeMap<String, TokenStats>,
     pub monthly_costs: BTreeMap<String, f64>,
+    pub monthly_costs_cline: BTreeMap<String, f64>,
+    pub monthly_costs_claude: BTreeMap<String, f64>,
+    pub monthly_costs_gemini: BTreeMap<String, f64>,
+    pub monthly_costs_zed: BTreeMap<String, f64>,
     pub monthly_tokens: BTreeMap<String, TokenStats>,
     pub model_stats: HashMap<String, TokenStats>,
     pub provider_costs: HashMap<Provider, f64>,
@@ -111,6 +115,9 @@ impl UnifiedStats {
         for (k, v) in &s.daily_costs {
             *self.daily_costs_cline.entry(k.clone()).or_insert(0.0) += v;
         }
+        for (k, v) in &s.monthly_costs {
+            *self.monthly_costs_cline.entry(k.clone()).or_insert(0.0) += v;
+        }
         self.merge_daily_tokens(&s.daily_tokens);
         for (k, v) in &s.daily_tokens {
             self.daily_tokens_cline.entry(k.clone()).or_default().add(v);
@@ -119,8 +126,8 @@ impl UnifiedStats {
         self.merge_monthly_tokens(&s.monthly_tokens);
         let flat_models: Vec<(String, TokenStats)> = s
             .monthly_model_tokens
-            .into_iter()
-            .flat_map(|(_, models)| models.into_iter())
+            .into_values()
+            .flat_map(|models| models.into_iter())
             .collect();
         self.merge_model_stats(flat_models);
         self.total_tokens.add(&s.total_tokens);
@@ -133,6 +140,9 @@ impl UnifiedStats {
         self.merge_costs(&s.daily_costs, &s.monthly_costs);
         for (k, v) in &s.daily_costs {
             *self.daily_costs_gemini.entry(k.clone()).or_insert(0.0) += v;
+        }
+        for (k, v) in &s.monthly_costs {
+            *self.monthly_costs_gemini.entry(k.clone()).or_insert(0.0) += v;
         }
         self.merge_daily_tokens(&s.daily_stats);
         for (k, v) in &s.daily_stats {
@@ -162,6 +172,9 @@ impl UnifiedStats {
         self.merge_costs(&s.daily_costs, &s.monthly_costs);
         for (k, v) in &s.daily_costs {
             *self.daily_costs_claude.entry(k.clone()).or_insert(0.0) += v;
+        }
+        for (k, v) in &s.monthly_costs {
+            *self.monthly_costs_claude.entry(k.clone()).or_insert(0.0) += v;
         }
         self.merge_daily_tokens(&s.daily_stats);
         for (k, v) in &s.daily_stats {
@@ -195,6 +208,9 @@ impl UnifiedStats {
         for (k, v) in &s.daily_costs {
             *self.daily_costs_zed.entry(k.clone()).or_insert(0.0) += v;
         }
+        for (k, v) in &s.monthly_costs {
+            *self.monthly_costs_zed.entry(k.clone()).or_insert(0.0) += v;
+        }
         self.merge_daily_tokens(&s.daily_stats);
         for (k, v) in &s.daily_stats {
             self.daily_tokens_zed.entry(k.clone()).or_default().add(v);
@@ -210,6 +226,76 @@ impl UnifiedStats {
         self.total_cost += s.total_cost;
         self.parse_time += parse_time;
         self.files_parsed += s.threads_found as u32;
+    }
+
+    pub fn pad_missing_dates(&mut self) {
+        use chrono::{Datelike, Duration, NaiveDate};
+
+        // 1. Pad Daily Data
+        let all_dates: Vec<NaiveDate> = self
+            .daily_costs
+            .keys()
+            .filter_map(|k| NaiveDate::parse_from_str(k, "%Y-%m-%d").ok())
+            .collect();
+
+        if let (Some(min_date), Some(max_date)) = (all_dates.iter().min(), all_dates.iter().max()) {
+            let mut curr = *min_date;
+            while curr <= *max_date {
+                let key = curr.format("%Y-%m-%d").to_string();
+                self.daily_costs.entry(key.clone()).or_insert(0.0);
+                self.daily_costs_cline.entry(key.clone()).or_insert(0.0);
+                self.daily_costs_claude.entry(key.clone()).or_insert(0.0);
+                self.daily_costs_gemini.entry(key.clone()).or_insert(0.0);
+                self.daily_costs_zed.entry(key.clone()).or_insert(0.0);
+                self.daily_tokens.entry(key.clone()).or_default();
+                self.daily_tokens_cline.entry(key.clone()).or_default();
+                self.daily_tokens_claude.entry(key.clone()).or_default();
+                self.daily_tokens_gemini.entry(key.clone()).or_default();
+                self.daily_tokens_zed.entry(key.clone()).or_default();
+                if let Some(next) = curr.checked_add_signed(Duration::try_days(1).unwrap()) {
+                    curr = next;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // 2. Pad Monthly Data
+        // Monthly keys are %Y-%m. We'll parse them as %Y-%m-01
+        let all_months: Vec<NaiveDate> = self
+            .monthly_costs
+            .keys()
+            .filter_map(|k| NaiveDate::parse_from_str(&format!("{}-01", k), "%Y-%m-%d").ok())
+            .collect();
+
+        if let (Some(min_month), Some(max_month)) =
+            (all_months.iter().min(), all_months.iter().max())
+        {
+            let mut curr = *min_month;
+            while curr <= *max_month {
+                let key = curr.format("%Y-%m").to_string();
+                self.monthly_costs.entry(key.clone()).or_insert(0.0);
+                self.monthly_costs_cline.entry(key.clone()).or_insert(0.0);
+                self.monthly_costs_claude.entry(key.clone()).or_insert(0.0);
+                self.monthly_costs_gemini.entry(key.clone()).or_insert(0.0);
+                self.monthly_costs_zed.entry(key.clone()).or_insert(0.0);
+                self.monthly_tokens.entry(key.clone()).or_default();
+
+                // Move to first day of next month
+                if curr.month() == 12 {
+                    if let Some(next) = NaiveDate::from_ymd_opt(curr.year() + 1, 1, 1) {
+                        curr = next;
+                    } else {
+                        break;
+                    }
+                } else if let Some(next) = NaiveDate::from_ymd_opt(curr.year(), curr.month() + 1, 1)
+                {
+                    curr = next;
+                } else {
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -287,7 +373,7 @@ pub fn run_unified_report(daily_days: usize) {
             .unwrap_or(20)
             .min(30);
         let mut sorted_models: Vec<_> = unified.model_stats.iter().collect();
-        sorted_models.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
+        sorted_models.sort_by_key(|b| std::cmp::Reverse(b.1.total()));
         for (model, stats) in sorted_models {
             crate::viz::print_token_bar(
                 &format!(
@@ -331,7 +417,7 @@ pub fn run_unified_report(daily_days: usize) {
             .copied()
             .fold(0.0_f64, |a, b| a.max(b));
         let mut sorted_days: Vec<_> = unified.daily_costs.iter().collect();
-        sorted_days.sort_by(|a, b| a.0.cmp(b.0));
+        sorted_days.sort_by_key(|a| a.0);
         for (day, cost) in sorted_days.into_iter().rev().take(daily_days) {
             if day == "Unknown" {
                 continue;
@@ -561,5 +647,26 @@ mod tests {
         assert!(u.model_stats.contains_key("claude-sonnet-4-6"));
         assert!(u.model_stats.contains_key("gemini-3-pro"));
         assert_eq!(u.model_stats.len(), 2);
+    }
+
+    #[test]
+    fn pad_missing_dates_fills_gaps() {
+        let mut u = UnifiedStats::default();
+        u.daily_costs.insert("2026-05-10".into(), 1.0);
+        u.daily_costs.insert("2026-05-12".into(), 2.0);
+        u.monthly_costs.insert("2026-03".into(), 10.0);
+        u.monthly_costs.insert("2026-05".into(), 20.0);
+
+        u.pad_missing_dates();
+
+        assert_eq!(u.daily_costs.get("2026-05-10"), Some(&1.0));
+        assert_eq!(u.daily_costs.get("2026-05-11"), Some(&0.0));
+        assert_eq!(u.daily_costs.get("2026-05-12"), Some(&2.0));
+        assert_eq!(u.daily_costs.len(), 3);
+
+        assert_eq!(u.monthly_costs.get("2026-03"), Some(&10.0));
+        assert_eq!(u.monthly_costs.get("2026-04"), Some(&0.0));
+        assert_eq!(u.monthly_costs.get("2026-05"), Some(&20.0));
+        assert_eq!(u.monthly_costs.len(), 3);
     }
 }
