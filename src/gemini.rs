@@ -306,7 +306,7 @@ pub fn print_gemini_report(global_stats: &GeminiStats, parsing_time: f64, daily_
             .max()
             .unwrap_or(0);
         let mut sorted_models: Vec<_> = global_stats.model_stats.iter().collect();
-        sorted_models.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
+        sorted_models.sort_by_key(|b| std::cmp::Reverse(b.1.total()));
         for (model, stats) in sorted_models {
             print_token_bar(
                 &format!(
@@ -332,7 +332,7 @@ pub fn print_gemini_report(global_stats: &GeminiStats, parsing_time: f64, daily_
             println!("\n{}{}{}", TERM_CYAN, month, TERM_RESET);
             let month_max = models.values().map(|s| s.total()).max().unwrap_or(1);
             let mut sorted_m: Vec<_> = models.iter().collect();
-            sorted_m.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
+            sorted_m.sort_by_key(|b| std::cmp::Reverse(b.1.total()));
             for (model, stats) in sorted_m {
                 print_token_bar(
                     &format!(

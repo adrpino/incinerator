@@ -126,8 +126,8 @@ impl UnifiedStats {
         self.merge_monthly_tokens(&s.monthly_tokens);
         let flat_models: Vec<(String, TokenStats)> = s
             .monthly_model_tokens
-            .into_iter()
-            .flat_map(|(_, models)| models.into_iter())
+            .into_values()
+            .flat_map(|models| models.into_iter())
             .collect();
         self.merge_model_stats(flat_models);
         self.total_tokens.add(&s.total_tokens);
@@ -373,7 +373,7 @@ pub fn run_unified_report(daily_days: usize) {
             .unwrap_or(20)
             .min(30);
         let mut sorted_models: Vec<_> = unified.model_stats.iter().collect();
-        sorted_models.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
+        sorted_models.sort_by_key(|b| std::cmp::Reverse(b.1.total()));
         for (model, stats) in sorted_models {
             crate::viz::print_token_bar(
                 &format!(
