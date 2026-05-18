@@ -266,7 +266,7 @@ pub fn print_claude_report(global_stats: &ClaudeStats, parsing_time: f64, daily_
             .max()
             .unwrap_or(0);
         let mut sorted_models: Vec<_> = global_stats.model_stats.iter().collect();
-        sorted_models.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
+        sorted_models.sort_by_key(|b| std::cmp::Reverse(b.1.total()));
         for (model, stats) in sorted_models {
             print_token_bar(
                 &format!(
@@ -292,7 +292,7 @@ pub fn print_claude_report(global_stats: &ClaudeStats, parsing_time: f64, daily_
             println!("\n{}{}{}", TERM_CYAN, month, TERM_RESET);
             let month_max = models.values().map(|s| s.total()).max().unwrap_or(1);
             let mut sorted_m: Vec<_> = models.iter().collect();
-            sorted_m.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
+            sorted_m.sort_by_key(|b| std::cmp::Reverse(b.1.total()));
             for (model, stats) in sorted_m {
                 print_token_bar(
                     &format!(
@@ -337,7 +337,7 @@ pub fn print_claude_report(global_stats: &ClaudeStats, parsing_time: f64, daily_
             .copied()
             .fold(0.0_f64, |a, b| a.max(b));
         let mut sorted_days: Vec<_> = global_stats.daily_costs.iter().collect();
-        sorted_days.sort_by(|a, b| a.0.cmp(b.0));
+        sorted_days.sort_by_key(|a| a.0);
         for (day, cost) in sorted_days.into_iter().rev().take(daily_days) {
             if day == "Unknown" {
                 continue;

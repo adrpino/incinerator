@@ -663,7 +663,7 @@ impl App {
         I: IntoIterator<Item = (&'a String, &'a f64)>,
     {
         let mut sorted_time_points: Vec<_> = source.into_iter().collect();
-        sorted_time_points.sort_by(|a, b| a.0.cmp(b.0));
+        sorted_time_points.sort_by_key(|a| a.0);
 
         let current_time_point = if is_monthly {
             chrono::Local::now().format("%Y-%m").to_string()
@@ -747,7 +747,7 @@ impl App {
         };
 
         let mut sorted_days: Vec<_> = source.iter().collect();
-        sorted_days.sort_by(|a, b| a.0.cmp(b.0));
+        sorted_days.sort_by_key(|a| a.0);
 
         // How many days fit? One line per day + block padding
         let num_days = (area.height as usize).saturating_sub(4).max(1);

@@ -417,7 +417,7 @@ pub fn run_unified_report(daily_days: usize) {
             .copied()
             .fold(0.0_f64, |a, b| a.max(b));
         let mut sorted_days: Vec<_> = unified.daily_costs.iter().collect();
-        sorted_days.sort_by(|a, b| a.0.cmp(b.0));
+        sorted_days.sort_by_key(|a| a.0);
         for (day, cost) in sorted_days.into_iter().rev().take(daily_days) {
             if day == "Unknown" {
                 continue;
