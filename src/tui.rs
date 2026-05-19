@@ -49,6 +49,7 @@ enum Tab {
     MonthlyCosts,
     DailyCosts,
     DailyTokens,
+    Languages,
     Settings,
 }
 
@@ -59,7 +60,8 @@ impl Tab {
             Tab::Providers => Tab::MonthlyCosts,
             Tab::MonthlyCosts => Tab::DailyCosts,
             Tab::DailyCosts => Tab::DailyTokens,
-            Tab::DailyTokens => Tab::Settings,
+            Tab::DailyTokens => Tab::Languages,
+            Tab::Languages => Tab::Settings,
             Tab::Settings => Tab::Summary,
         }
     }
@@ -71,7 +73,8 @@ impl Tab {
             Tab::MonthlyCosts => Tab::Providers,
             Tab::DailyCosts => Tab::MonthlyCosts,
             Tab::DailyTokens => Tab::DailyCosts,
-            Tab::Settings => Tab::DailyTokens,
+            Tab::Languages => Tab::DailyTokens,
+            Tab::Settings => Tab::Languages,
         }
     }
 
@@ -163,6 +166,10 @@ enum FileStats {
     Cline(ClineStats),
     Claude(ClaudeStats),
     Gemini(GeminiStats),
+    /// A single Gemini `tool-outputs/{write_file,replace}_N.txt` file. These
+    /// live outside the session JSONL and are the only source of Gemini
+    /// language data, so we parse them as their own cache entries.
+    GeminiLang(crate::languages::LanguageAnalyzer),
     Zed(ZedStats),
 }
 
@@ -309,7 +316,10 @@ impl App {
                         KeyCode::Char(c @ ('1' | '2' | '3' | '4' | '5'))
                             if matches!(
                                 self.tab,
-                                Tab::MonthlyCosts | Tab::DailyCosts | Tab::DailyTokens
+                                Tab::MonthlyCosts
+                                    | Tab::DailyCosts
+                                    | Tab::DailyTokens
+                                    | Tab::Languages
                             ) =>
                         {
                             self.daily_filter = match c {
@@ -366,6 +376,7 @@ impl App {
             " Monthly Costs ",
             " Daily Costs ",
             " Daily Tokens ",
+            " Languages ",
             " Settings ",
         ];
         let tabs = Tabs::new(titles)
@@ -384,6 +395,7 @@ impl App {
             Tab::MonthlyCosts => self.draw_monthly_costs(f, chunks[1]),
             Tab::DailyCosts => self.draw_daily_costs(f, chunks[1]),
             Tab::DailyTokens => self.draw_daily_tokens(f, chunks[1]),
+            Tab::Languages => self.draw_languages(f, chunks[1]),
             Tab::Settings => self.draw_settings(f, chunks[1]),
         }
 
@@ -833,6 +845,68 @@ impl App {
         f.render_widget(paragraph, area);
     }
 
+    fn draw_languages(&self, f: &mut Frame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
+
+        self.render_filter_chips(f, chunks[0]);
+
+        let analyzer = match self.daily_filter {
+            DailyFilter::All => &self.stats.languages,
+            DailyFilter::Cline => &self.stats.languages_cline,
+            DailyFilter::Claude => &self.stats.languages_claude,
+            DailyFilter::Gemini => &self.stats.languages_gemini,
+            DailyFilter::Zed => &self.stats.languages_zed,
+        };
+
+        let mut sorted_langs: Vec<_> = analyzer.stats.iter().collect();
+        sorted_langs.sort_by_key(|a| std::cmp::Reverse(a.1.occurrences));
+
+        let mut lines = Vec::new();
+        lines.push(Line::from(vec![Span::styled(
+            "  Language Breakdown (Snippets Identified)",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]));
+        lines.push(Line::from(""));
+
+        if sorted_langs.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "No code snippets detected.",
+                Style::default().dim(),
+            )));
+        } else {
+            let max_occurrences = sorted_langs
+                .first()
+                .map(|(_, s)| s.occurrences)
+                .unwrap_or(1);
+            let palette = self.settings.theme.palette();
+
+            for (lang, stats) in sorted_langs {
+                let bar_width = 40;
+                let pct = (stats.occurrences as f64 / max_occurrences as f64).min(1.0);
+                let filled = (pct * bar_width as f64).round() as usize;
+
+                let line = vec![
+                    Span::raw(format!("  {:<12} ", lang)),
+                    Span::styled("█".repeat(filled), Style::default().fg(palette.cost)),
+                    Span::raw(" ".repeat(bar_width - filled)),
+                    Span::raw(format!(
+                        " {:>4} occurrences ({} bytes)",
+                        stats.occurrences, stats.bytes
+                    )),
+                ];
+                lines.push(Line::from(line));
+            }
+        }
+
+        let title = format!(" Languages — {} ", self.daily_filter.label());
+        let paragraph =
+            Paragraph::new(lines).block(Block::default().title(title).borders(Borders::ALL));
+        f.render_widget(paragraph, chunks[1]);
+    }
+
     fn draw_settings(&self, f: &mut Frame, area: Rect) {
         let palette = self.settings.theme.palette();
         let check = if self.settings.heat_effects {
@@ -904,7 +978,10 @@ fn run_scan_pass(
 ) -> (HashMap<PathBuf, (SystemTime, FileStats)>, UnifiedStats) {
     use crate::claude::{get_claude_files, parse_claude_file};
     use crate::cline::{get_cline_files, parse_cline_file};
-    use crate::gemini::{get_gemini_files, parse_gemini_file};
+    use crate::gemini::{
+        get_gemini_files, get_gemini_tool_output_files, parse_gemini_file,
+        parse_gemini_tool_output_file,
+    };
     use crate::zed::{get_zed_db_path, parse_zed_db};
     use rayon::prelude::*;
     use std::collections::HashSet;
@@ -924,14 +1001,16 @@ fn run_scan_pass(
 
     let t = Instant::now();
     let gemini_files = get_gemini_files();
+    let gemini_lang_files = get_gemini_tool_output_files();
     let t_walk_gemini = t.elapsed();
     let n_gemini = gemini_files.len();
+    let n_gemini_lang = gemini_lang_files.len();
 
     let zed_db_path = get_zed_db_path();
     let n_zed = if zed_db_path.is_some() { 1 } else { 0 };
 
     progress.total.store(
-        (n_cline + n_claude + n_gemini + n_zed) as u32,
+        (n_cline + n_claude + n_gemini + n_gemini_lang + n_zed) as u32,
         Ordering::Relaxed,
     );
 
@@ -939,6 +1018,7 @@ fn run_scan_pass(
         .iter()
         .chain(claude_files.iter())
         .chain(gemini_files.iter())
+        .chain(gemini_lang_files.iter())
         .cloned()
         .collect();
 
@@ -952,6 +1032,7 @@ fn run_scan_pass(
         Cline,
         Claude,
         Gemini,
+        GeminiLang,
         Zed,
     }
     let mut tasks = Vec::new();
@@ -963,6 +1044,9 @@ fn run_scan_pass(
     }
     for p in gemini_files {
         tasks.push((p, PType::Gemini));
+    }
+    for p in gemini_lang_files {
+        tasks.push((p, PType::GeminiLang));
     }
     if let Some(p) = zed_db_path {
         tasks.push((p, PType::Zed));
@@ -988,6 +1072,7 @@ fn run_scan_pass(
                 PType::Cline => FileStats::Cline(parse_cline_file(&path, false, false)),
                 PType::Claude => FileStats::Claude(parse_claude_file(&path)),
                 PType::Gemini => FileStats::Gemini(parse_gemini_file(&path)),
+                PType::GeminiLang => FileStats::GeminiLang(parse_gemini_tool_output_file(&path)),
                 PType::Zed => {
                     // parse_zed_db doesn't take a path currently but we can use it if we adapt it or just call it
                     // For now, let's assume it works as it finds its own path, but we'll use the one we found.
@@ -1036,7 +1121,7 @@ fn run_scan_pass(
                         claude_us_max = parse_us;
                     }
                 }
-                FileStats::Gemini(_) => {
+                FileStats::Gemini(_) | FileStats::GeminiLang(_) => {
                     gemini_n += 1;
                     gemini_us_sum += parse_us;
                     if parse_us > gemini_us_max {
@@ -1066,6 +1151,7 @@ fn run_scan_pass(
                 FileStats::Cline(s) => new_stats.add_cline(s.clone(), 0.0),
                 FileStats::Claude(s) => new_stats.add_claude(s.clone(), 0.0),
                 FileStats::Gemini(s) => new_stats.add_gemini(s.clone(), 0.0),
+                FileStats::GeminiLang(langs) => new_stats.add_gemini_languages(langs),
                 FileStats::Zed(s) => new_stats.add_zed(s.clone(), 0.0),
             }
         }
@@ -1242,6 +1328,7 @@ mod tests {
             Tab::MonthlyCosts,
             Tab::DailyCosts,
             Tab::DailyTokens,
+            Tab::Languages,
             Tab::Settings,
         ];
         for i in 0..order.len() {
@@ -1258,6 +1345,7 @@ mod tests {
             Tab::MonthlyCosts,
             Tab::DailyCosts,
             Tab::DailyTokens,
+            Tab::Languages,
             Tab::Settings,
         ];
         for i in 0..order.len() {
@@ -1274,6 +1362,7 @@ mod tests {
             Tab::MonthlyCosts,
             Tab::DailyCosts,
             Tab::DailyTokens,
+            Tab::Languages,
             Tab::Settings,
         ] {
             assert_eq!(t.next().prev(), t);
@@ -1288,7 +1377,8 @@ mod tests {
         assert_eq!(Tab::MonthlyCosts.index(), 2);
         assert_eq!(Tab::DailyCosts.index(), 3);
         assert_eq!(Tab::DailyTokens.index(), 4);
-        assert_eq!(Tab::Settings.index(), 5);
+        assert_eq!(Tab::Languages.index(), 5);
+        assert_eq!(Tab::Settings.index(), 6);
     }
 
     #[test]
