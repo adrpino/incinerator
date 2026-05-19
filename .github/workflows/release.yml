@@ -1,0 +1,35 @@
+name: Release
+
+permissions:
+  contents: write
+  id-token: write # Required for SLSA attestations
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger on version tags (e.g., v0.1.0)
+
+jobs:
+  # This job triggers the cargo-dist orchestration
+  dist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install cargo-dist
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.22.1/cargo-dist-installer.sh | sh
+      - name: Run cargo-dist
+        run: cargo dist build --output-format=json > dist-manifest.json
+      # This step creates the secure "receipt" for your binary
+      - name: Attest Build Provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: 'target/dist/*'
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: target/dist/*
+          body: "See the assets below for the incinerator binaries and install scripts."
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
