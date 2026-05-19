@@ -6,6 +6,7 @@ mod colors;
 mod eco;
 mod format;
 mod gemini;
+pub mod languages;
 mod pricing;
 mod tui;
 mod unified;

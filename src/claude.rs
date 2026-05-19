@@ -25,6 +25,7 @@ struct ClaudeUsage {
 struct ClaudeAssistantMessage {
     model: Option<String>,
     usage: Option<ClaudeUsage>,
+    content: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -45,11 +46,13 @@ pub struct ClaudeStats {
     pub monthly_model_usage: BTreeMap<String, HashMap<String, TokenStats>>,
     pub total_messages: usize,
     pub sessions_found: usize,
+    pub languages: crate::languages::LanguageAnalyzer,
 }
 
 fn merge_claude_stats(mut a: ClaudeStats, b: ClaudeStats) -> ClaudeStats {
     a.total_messages += b.total_messages;
     a.sessions_found += b.sessions_found;
+    a.languages.merge(&b.languages);
 
     for (k, v) in b.daily_stats {
         a.daily_stats.entry(k).or_default().add(&v);
@@ -80,6 +83,77 @@ pub fn get_claude_storage_path() -> Option<PathBuf> {
     Some(home.join(".claude/projects"))
 }
 
+/// Inspect the `content` array of an assistant message and record any file
+/// edits performed by Claude Code's built-in tools (`Write`, `Edit`,
+/// `MultiEdit`, `NotebookEdit`). The byte count attributed to each edit is the
+/// length of the freshly written text, never the file as a whole.
+fn extract_file_edits(
+    content: &serde_json::Value,
+    languages: &mut crate::languages::LanguageAnalyzer,
+) {
+    let Some(arr) = content.as_array() else {
+        return;
+    };
+
+    for item in arr {
+        if item.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+            continue;
+        }
+        let Some(name) = item.get("name").and_then(|n| n.as_str()) else {
+            continue;
+        };
+        let Some(input) = item.get("input") else {
+            continue;
+        };
+
+        match name {
+            "Write" => {
+                if let Some(path) = input.get("file_path").and_then(|p| p.as_str()) {
+                    let len = input
+                        .get("content")
+                        .and_then(|c| c.as_str())
+                        .map_or(0, |c| c.len());
+                    languages.record_file_edit(path, len);
+                }
+            }
+            "Edit" => {
+                if let Some(path) = input.get("file_path").and_then(|p| p.as_str()) {
+                    let len = input
+                        .get("new_string")
+                        .and_then(|c| c.as_str())
+                        .map_or(0, |c| c.len());
+                    languages.record_file_edit(path, len);
+                }
+            }
+            "MultiEdit" => {
+                let Some(path) = input.get("file_path").and_then(|p| p.as_str()) else {
+                    continue;
+                };
+                let Some(edits) = input.get("edits").and_then(|e| e.as_array()) else {
+                    continue;
+                };
+                for edit in edits {
+                    let len = edit
+                        .get("new_string")
+                        .and_then(|c| c.as_str())
+                        .map_or(0, |c| c.len());
+                    languages.record_file_edit(path, len);
+                }
+            }
+            "NotebookEdit" => {
+                if let Some(path) = input.get("notebook_path").and_then(|p| p.as_str()) {
+                    let len = input
+                        .get("new_source")
+                        .and_then(|c| c.as_str())
+                        .map_or(0, |c| c.len());
+                    languages.record_file_edit(path, len);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn parse_claude_file(file_path: &std::path::Path) -> ClaudeStats {
     let mut local = ClaudeStats::default();
     let file = match fs::File::open(file_path) {
@@ -105,6 +179,11 @@ pub fn parse_claude_file(file_path: &std::path::Path) -> ClaudeStats {
             Some(m) => m,
             None => continue,
         };
+
+        if let Some(content) = &assistant_msg.content {
+            extract_file_edits(content, &mut local.languages);
+        }
+
         let usage = match assistant_msg.usage {
             Some(u) => u,
             None => continue,
@@ -399,11 +478,27 @@ pub fn print_claude_report(global_stats: &ClaudeStats, parsing_time: f64, daily_
     println!("  Sessions Parsed: {}", global_stats.sessions_found);
     println!("  Parse Time:      {:.2} seconds", parsing_time);
     println!("{}", "=".repeat(50));
+
+    if !global_stats.languages.stats.is_empty() {
+        println!("\n{}=== LANGUAGES ==={}", TERM_HEADER, TERM_RESET);
+        let mut sorted_langs: Vec<_> = global_stats.languages.stats.iter().collect();
+        sorted_langs.sort_by_key(|b| std::cmp::Reverse(b.1.bytes));
+        for (lang, stat) in sorted_langs {
+            println!(
+                "  {:<14} {:>5} occurrences ({:>8} bytes)",
+                lang, stat.occurrences, stat.bytes
+            );
+        }
+        println!("{}", "=".repeat(50));
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::languages::LanguageAnalyzer;
     use crate::pricing::get_claude_pricing;
+    use serde_json::json;
 
     #[test]
     fn test_claude_pricing() {
@@ -424,5 +519,221 @@ mod tests {
         // fallback
         let pricing = get_claude_pricing("some-unknown-model");
         assert_eq!(pricing.input, 3.00);
+    }
+
+    fn run_extract(content: serde_json::Value) -> LanguageAnalyzer {
+        let mut analyzer = LanguageAnalyzer::new();
+        extract_file_edits(&content, &mut analyzer);
+        analyzer
+    }
+
+    #[test]
+    fn extract_write_tool_records_content_length() {
+        let content = json!([
+            {
+                "type": "tool_use",
+                "name": "Write",
+                "input": {
+                    "file_path": "src/lib.rs",
+                    "content": "fn hello() {}\n"
+                }
+            }
+        ]);
+        let analyzer = run_extract(content);
+        let rust = analyzer.stats.get("Rust").expect("rust recorded");
+        assert_eq!(rust.occurrences, 1);
+        assert_eq!(rust.bytes, "fn hello() {}\n".len());
+    }
+
+    #[test]
+    fn extract_edit_tool_uses_new_string_for_bytes() {
+        let new_string = "replacement";
+        let content = json!([
+            {
+                "type": "tool_use",
+                "name": "Edit",
+                "input": {
+                    "file_path": "scripts/run.sh",
+                    "old_string": "echo old",
+                    "new_string": new_string,
+                    "replace_all": false
+                }
+            }
+        ]);
+        let analyzer = run_extract(content);
+        let shell = analyzer.stats.get("Shell").expect("shell recorded");
+        assert_eq!(shell.occurrences, 1);
+        assert_eq!(shell.bytes, new_string.len());
+    }
+
+    #[test]
+    fn extract_multi_edit_records_each_edit() {
+        let content = json!([
+            {
+                "type": "tool_use",
+                "name": "MultiEdit",
+                "input": {
+                    "file_path": "src/app.py",
+                    "edits": [
+                        {"old_string": "a", "new_string": "xx"},
+                        {"old_string": "b", "new_string": "yyyy"},
+                        {"old_string": "c", "new_string": ""}
+                    ]
+                }
+            }
+        ]);
+        let analyzer = run_extract(content);
+        let py = analyzer.stats.get("Python").expect("python recorded");
+        assert_eq!(py.occurrences, 3);
+        assert_eq!(py.bytes, 2 + 4 + 0);
+    }
+
+    #[test]
+    fn extract_notebook_edit_uses_new_source() {
+        let content = json!([
+            {
+                "type": "tool_use",
+                "name": "NotebookEdit",
+                "input": {
+                    "notebook_path": "analysis.ipynb",
+                    "new_source": "print('hi')"
+                }
+            }
+        ]);
+        let analyzer = run_extract(content);
+        // .ipynb is not in the extension map → ignored (unknown language)
+        assert!(analyzer.stats.is_empty());
+    }
+
+    #[test]
+    fn extract_skips_non_tool_use_items() {
+        let content = json!([
+            {"type": "text", "text": "some assistant prose"},
+            {
+                "type": "tool_use",
+                "name": "Bash",
+                "input": {"command": "ls"}
+            },
+            {
+                "type": "tool_use",
+                "name": "Read",
+                "input": {"file_path": "src/main.rs"}
+            }
+        ]);
+        let analyzer = run_extract(content);
+        assert!(
+            analyzer.stats.is_empty(),
+            "Read/Bash/text should not record file edits"
+        );
+    }
+
+    #[test]
+    fn extract_handles_missing_fields() {
+        // Tool calls in flight (no file_path / no content yet) must not panic
+        // and must not record bogus edits.
+        let content = json!([
+            {"type": "tool_use", "name": "Write", "input": {}},
+            {"type": "tool_use", "name": "Edit", "input": {"file_path": "x.rs"}},
+            {"type": "tool_use", "name": "MultiEdit", "input": {"file_path": "x.rs"}},
+            {"type": "tool_use", "name": "Write", "input": {"file_path": "x.rs"}}
+        ]);
+        let analyzer = run_extract(content);
+        // The last Write has a path but no content → record as 0 bytes occurrence.
+        // Edit with no new_string → record as 0 bytes occurrence.
+        let rust = analyzer.stats.get("Rust").expect("rust recorded");
+        assert_eq!(rust.occurrences, 2);
+        assert_eq!(rust.bytes, 0);
+    }
+
+    #[test]
+    fn extract_handles_non_array_content() {
+        // Some assistant messages carry content as a plain string. Should not
+        // panic and should record nothing.
+        let analyzer = run_extract(json!("just a string"));
+        assert!(analyzer.stats.is_empty());
+
+        let analyzer = run_extract(json!(null));
+        assert!(analyzer.stats.is_empty());
+    }
+
+    #[test]
+    fn extract_handles_multiple_languages_in_one_message() {
+        let content = json!([
+            {"type": "tool_use", "name": "Write", "input": {"file_path": "a.py", "content": "x"}},
+            {"type": "tool_use", "name": "Edit", "input": {"file_path": "b.ts", "new_string": "yy"}},
+            {"type": "tool_use", "name": "Write", "input": {"file_path": "Dockerfile", "content": "FROM scratch"}}
+        ]);
+        let analyzer = run_extract(content);
+        assert_eq!(analyzer.stats.get("Python").unwrap().occurrences, 1);
+        assert_eq!(analyzer.stats.get("TypeScript").unwrap().occurrences, 1);
+        assert_eq!(analyzer.stats.get("Dockerfile").unwrap().occurrences, 1);
+    }
+
+    #[test]
+    fn parse_claude_file_end_to_end() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+        let mut f = std::fs::File::create(&path).expect("create");
+
+        // assistant message with a Write tool call and a usage block
+        let line1 = json!({
+            "type": "assistant",
+            "timestamp": "2026-05-19T10:00:00Z",
+            "message": {
+                "model": "claude-sonnet-4-6-20251001",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 10
+                },
+                "content": [
+                    {"type": "tool_use", "name": "Write", "input": {
+                        "file_path": "src/main.rs",
+                        "content": "fn main() {}\n"
+                    }}
+                ]
+            }
+        });
+        // user message — must be skipped
+        let line2 = json!({"type": "user", "message": {"content": "hi"}});
+        // malformed line — must be skipped without panicking
+        let line3 = "{not json";
+        // assistant with usage but no tool calls — should still record tokens
+        let line4 = json!({
+            "type": "assistant",
+            "timestamp": "2026-05-19T11:00:00Z",
+            "message": {
+                "model": "claude-sonnet-4-6-20251001",
+                "usage": {"input_tokens": 5, "output_tokens": 5},
+                "content": [{"type": "text", "text": "ok"}]
+            }
+        });
+
+        for line in [
+            line1.to_string(),
+            line2.to_string(),
+            line3.to_string(),
+            line4.to_string(),
+        ] {
+            writeln!(f, "{}", line).unwrap();
+        }
+        drop(f);
+
+        let stats = parse_claude_file(&path);
+        assert_eq!(stats.sessions_found, 1);
+        assert_eq!(stats.total_messages, 2);
+
+        let rust = stats.languages.stats.get("Rust").expect("rust recorded");
+        assert_eq!(rust.occurrences, 1);
+        assert_eq!(rust.bytes, "fn main() {}\n".len());
+
+        // Tokens & costs were aggregated under the right day/month buckets.
+        assert!(stats.daily_stats.contains_key("2026-05-19"));
+        assert!(stats.monthly_stats.contains_key("2026-05"));
+        let day = stats.daily_stats.get("2026-05-19").unwrap();
+        assert_eq!(day.in_tokens, 105);
+        assert_eq!(day.out_tokens, 55);
     }
 }

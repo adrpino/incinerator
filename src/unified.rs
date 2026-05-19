@@ -53,6 +53,11 @@ pub struct UnifiedStats {
     pub files_parsed: u32,
     pub files_last_parsed: u32,
     pub show_cache_create: bool,
+    pub languages: crate::languages::LanguageAnalyzer,
+    pub languages_cline: crate::languages::LanguageAnalyzer,
+    pub languages_claude: crate::languages::LanguageAnalyzer,
+    pub languages_gemini: crate::languages::LanguageAnalyzer,
+    pub languages_zed: crate::languages::LanguageAnalyzer,
 }
 
 impl UnifiedStats {
@@ -134,6 +139,8 @@ impl UnifiedStats {
         self.total_cost += s.total_cost;
         self.parse_time += parse_time;
         self.files_parsed += s.files_found;
+        self.languages.merge(&s.languages);
+        self.languages_cline.merge(&s.languages);
     }
 
     pub fn add_gemini(&mut self, s: GeminiStats, parse_time: f64) {
@@ -166,6 +173,8 @@ impl UnifiedStats {
         self.total_cost += cost;
         self.parse_time += parse_time;
         self.files_parsed += s.sessions_found as u32;
+        self.languages.merge(&s.languages);
+        self.languages_gemini.merge(&s.languages);
     }
 
     pub fn add_claude(&mut self, s: ClaudeStats, parse_time: f64) {
@@ -198,9 +207,20 @@ impl UnifiedStats {
         self.total_cost += cost;
         self.parse_time += parse_time;
         self.files_parsed += s.sessions_found as u32;
+        self.languages.merge(&s.languages);
+        self.languages_claude.merge(&s.languages);
         if total.cache_create_tokens > 0 {
             self.show_cache_create = true;
         }
+    }
+
+    /// Merge a standalone Gemini tool-output language analyzer (sourced from
+    /// `~/.gemini/tmp/<project>/tool-outputs/`) into both the global and the
+    /// per-provider Gemini analyzers. Used by the TUI scan path, which walks
+    /// tool-output files on its own so they participate in the mtime cache.
+    pub fn add_gemini_languages(&mut self, langs: &crate::languages::LanguageAnalyzer) {
+        self.languages.merge(langs);
+        self.languages_gemini.merge(langs);
     }
 
     pub fn add_zed(&mut self, s: ZedStats, parse_time: f64) {
@@ -226,6 +246,8 @@ impl UnifiedStats {
         self.total_cost += s.total_cost;
         self.parse_time += parse_time;
         self.files_parsed += s.threads_found as u32;
+        self.languages.merge(&s.languages);
+        self.languages_zed.merge(&s.languages);
     }
 
     pub fn pad_missing_dates(&mut self) {
@@ -636,6 +658,76 @@ mod tests {
         assert_eq!(day.out_tokens, 100 + 250);
         assert_eq!(day.cache_read_tokens, 50 + 100);
         assert_eq!(day.cache_create_tokens, 80);
+    }
+
+    #[test]
+    fn languages_merge_from_every_provider() {
+        use crate::zed::ZedStats;
+
+        let mut cline = cline_fixture();
+        cline.languages.record_file_edit("a.py", 10);
+        cline.languages.record_file_edit("b.py", 5);
+
+        let mut claude = claude_fixture_with_cache_create();
+        claude.languages.record_file_edit("c.rs", 20);
+
+        let mut gemini = gemini_fixture();
+        gemini.languages.record_file_edit("d.ts", 7);
+
+        let mut zed = ZedStats::default();
+        zed.languages.record_file_edit("e.go", 3);
+
+        let mut u = UnifiedStats::default();
+        u.add_cline(cline, 0.0);
+        u.add_claude(claude, 0.0);
+        u.add_gemini(gemini, 0.0);
+        u.add_zed(zed, 0.0);
+
+        // Global analyzer holds the union (regression: add_cline / add_gemini
+        // previously dropped languages on the floor).
+        let py = u.languages.stats.get("Python").expect("python present");
+        assert_eq!(py.occurrences, 2);
+        assert_eq!(py.bytes, 15);
+        assert!(u.languages.stats.contains_key("Rust"));
+        assert!(u.languages.stats.contains_key("TypeScript"));
+        assert!(u.languages.stats.contains_key("Go"));
+
+        // Per-provider analyzers each carry only their own data — this is what
+        // the TUI's Languages filter switches between.
+        let cline_py = u.languages_cline.stats.get("Python").expect("py in cline");
+        assert_eq!(cline_py.occurrences, 2);
+        assert_eq!(cline_py.bytes, 15);
+        assert!(!u.languages_cline.stats.contains_key("Rust"));
+        assert!(!u.languages_cline.stats.contains_key("TypeScript"));
+        assert!(!u.languages_cline.stats.contains_key("Go"));
+
+        assert!(u.languages_claude.stats.contains_key("Rust"));
+        assert_eq!(u.languages_claude.stats.len(), 1);
+
+        assert!(u.languages_gemini.stats.contains_key("TypeScript"));
+        assert_eq!(u.languages_gemini.stats.len(), 1);
+
+        // The TUI scan path uses add_gemini_languages to merge tool-output
+        // files directly, bypassing GeminiStats. That data must also land in
+        // both the global and per-provider Gemini analyzers.
+        let mut extra = crate::languages::LanguageAnalyzer::new();
+        extra.record_file_edit("f.js", 11);
+        u.add_gemini_languages(&extra);
+        let js_global = u.languages.stats.get("JavaScript").expect("js global");
+        assert_eq!(js_global.occurrences, 1);
+        assert_eq!(js_global.bytes, 11);
+        let js_gemini = u
+            .languages_gemini
+            .stats
+            .get("JavaScript")
+            .expect("js gemini");
+        assert_eq!(js_gemini.occurrences, 1);
+        assert!(!u.languages_cline.stats.contains_key("JavaScript"));
+        assert!(!u.languages_claude.stats.contains_key("JavaScript"));
+        assert!(!u.languages_zed.stats.contains_key("JavaScript"));
+
+        assert!(u.languages_zed.stats.contains_key("Go"));
+        assert_eq!(u.languages_zed.stats.len(), 1);
     }
 
     #[test]

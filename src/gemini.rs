@@ -45,6 +45,7 @@ pub struct GeminiStats {
     pub monthly_model_usage: BTreeMap<String, HashMap<String, TokenStats>>,
     pub total_messages: usize,
     pub sessions_found: usize,
+    pub languages: crate::languages::LanguageAnalyzer,
 }
 
 fn estimate_tokens(content: &Option<serde_json::Value>) -> i64 {
@@ -73,6 +74,7 @@ fn estimate_tokens(content: &Option<serde_json::Value>) -> i64 {
 fn merge_gemini_stats(mut a: GeminiStats, b: GeminiStats) -> GeminiStats {
     a.total_messages += b.total_messages;
     a.sessions_found += b.sessions_found;
+    a.languages.merge(&b.languages);
 
     for (k, v) in b.daily_stats {
         a.daily_stats.entry(k).or_default().add(&v);
@@ -101,6 +103,96 @@ fn merge_gemini_stats(mut a: GeminiStats, b: GeminiStats) -> GeminiStats {
 pub fn get_gemini_storage_path() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
     Some(home.join(".gemini/tmp"))
+}
+
+/// Parse the first-line preamble of a Gemini `tool-outputs/write_file_N.txt`
+/// or `replace_N.txt` file and return `(absolute_path, body_byte_len)`.
+///
+/// Gemini's tool-output files are not JSON; they begin with a fixed sentence
+/// describing what was written, followed by the file contents. We use the
+/// declared path for language attribution and the length of the trailing body
+/// as a byte count. Error outputs (which start with `{`) and any output we
+/// cannot recognise return `None`.
+pub fn parse_gemini_tool_output(text: &str) -> Option<(&str, usize)> {
+    if let Some(rest) = text.strip_prefix("Successfully created and wrote to new file: ") {
+        let suffix = ". Here is the updated code:";
+        let end = rest.find(suffix)?;
+        let path = &rest[..end];
+        let body = rest[end + suffix.len()..].trim_start_matches('\n');
+        return Some((path, body.len()));
+    }
+    if let Some(rest) = text.strip_prefix("Successfully modified file: ") {
+        let count_marker = rest.find(" (");
+        let here_marker = rest.find(". Here is the updated code:");
+        let path_end = match (count_marker, here_marker) {
+            (Some(c), Some(h)) => c.min(h),
+            (Some(c), None) => c,
+            (None, Some(h)) => h,
+            (None, None) => return None,
+        };
+        let path = &rest[..path_end];
+        let body = match here_marker {
+            Some(h) => {
+                let body_start = h + ". Here is the updated code:".len();
+                rest[body_start..].trim_start_matches('\n')
+            }
+            None => "",
+        };
+        return Some((path, body.len()));
+    }
+    None
+}
+
+/// True if the basename of the file matches `<tool>_<N>.txt` for tools that
+/// modify files (`write_file`, `replace`).
+fn is_gemini_edit_tool_output(name: &str) -> bool {
+    let stem = name.strip_suffix(".txt").unwrap_or(name);
+    let (tool, num) = match stem.rsplit_once('_') {
+        Some(pair) => pair,
+        None => return false,
+    };
+    if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    matches!(tool, "write_file" | "replace")
+}
+
+pub fn parse_gemini_tool_output_file(
+    file_path: &std::path::Path,
+) -> crate::languages::LanguageAnalyzer {
+    let mut analyzer = crate::languages::LanguageAnalyzer::new();
+    let text = match fs::read_to_string(file_path) {
+        Ok(t) => t,
+        Err(_) => return analyzer,
+    };
+    if let Some((path, len)) = parse_gemini_tool_output(&text) {
+        analyzer.record_file_edit(path, len);
+    }
+    analyzer
+}
+
+pub fn get_gemini_tool_output_files() -> Vec<PathBuf> {
+    let base = match get_gemini_storage_path() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    if !base.exists() {
+        return Vec::new();
+    }
+    WalkDir::new(&base)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            // require parent dir to be named "tool-outputs"
+            let in_tool_outputs = e
+                .path()
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|n| n == "tool-outputs");
+            in_tool_outputs && is_gemini_edit_tool_output(&e.file_name().to_string_lossy())
+        })
+        .map(|e| e.path().to_path_buf())
+        .collect()
 }
 
 pub fn parse_gemini_file(file_path: &std::path::Path) -> GeminiStats {
@@ -141,6 +233,9 @@ pub fn parse_gemini_file(file_path: &std::path::Path) -> GeminiStats {
     }
 
     for msg in messages {
+        // File edits are not recorded in session JSONL files — Gemini stores
+        // tool invocations as plain-text files under a sibling `tool-outputs/`
+        // directory. Those are walked separately in `run_gemini_report`.
         let msg_type = msg.msg_type.as_deref().unwrap_or("unknown");
         let msg_model = msg.model.clone().unwrap_or_else(|| session_model.clone());
 
@@ -247,10 +342,24 @@ pub fn run_gemini_report() -> Option<(GeminiStats, f64)> {
         return None;
     }
 
-    let global_stats = session_files
+    let mut global_stats = session_files
         .par_iter()
         .map(|file_path| parse_gemini_file(file_path))
         .reduce(GeminiStats::default, merge_gemini_stats);
+
+    // Walk sibling tool-outputs/ files to recover language data, which the
+    // session JSONL does not carry.
+    let tool_output_files = get_gemini_tool_output_files();
+    if !tool_output_files.is_empty() {
+        let languages = tool_output_files
+            .par_iter()
+            .map(|p| parse_gemini_tool_output_file(p))
+            .reduce(crate::languages::LanguageAnalyzer::new, |mut a, b| {
+                a.merge(&b);
+                a
+            });
+        global_stats.languages.merge(&languages);
+    }
 
     let parsing_time = start_time.elapsed().as_secs_f64();
     if global_stats.total_messages == 0 {
@@ -432,11 +541,222 @@ pub fn print_gemini_report(global_stats: &GeminiStats, parsing_time: f64, daily_
     println!("  Sessions Parsed: {}", global_stats.sessions_found);
     println!("  Parse Time:      {:.2} seconds", parsing_time);
     println!("{}", "=".repeat(50));
+
+    if !global_stats.languages.stats.is_empty() {
+        println!("\n{}=== LANGUAGES ==={}", TERM_HEADER, TERM_RESET);
+        let mut sorted_langs: Vec<_> = global_stats.languages.stats.iter().collect();
+        sorted_langs.sort_by_key(|b| std::cmp::Reverse(b.1.bytes));
+        for (lang, stat) in sorted_langs {
+            println!(
+                "  {:<14} {:>5} occurrences ({:>8} bytes)",
+                lang, stat.occurrences, stat.bytes
+            );
+        }
+        println!("{}", "=".repeat(50));
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::pricing::get_gemini_pricing;
+
+    #[test]
+    fn parses_write_file_preamble() {
+        let text = "Successfully created and wrote to new file: /tmp/example.rs. Here is the updated code:\nfn main() {}\n";
+        let (path, len) = parse_gemini_tool_output(text).expect("parsed");
+        assert_eq!(path, "/tmp/example.rs");
+        assert_eq!(len, "fn main() {}\n".len());
+    }
+
+    #[test]
+    fn parses_replace_preamble_with_count() {
+        let text = "Successfully modified file: /tmp/x.py (3 replacements). Here is the updated code:\nbody\n";
+        let (path, len) = parse_gemini_tool_output(text).expect("parsed");
+        assert_eq!(path, "/tmp/x.py");
+        assert_eq!(len, "body\n".len());
+    }
+
+    #[test]
+    fn parses_replace_preamble_without_here_block() {
+        // Older / shorter form: no trailing "Here is the updated code:" body
+        let text = "Successfully modified file: /tmp/y.ts (1 replacements).";
+        let (path, len) = parse_gemini_tool_output(text).expect("parsed");
+        assert_eq!(path, "/tmp/y.ts");
+        assert_eq!(len, 0);
+    }
+
+    #[test]
+    fn rejects_error_output() {
+        let text = "{\n  \"error\": \"Failed to edit, 0 occurrences found for old_string in src/x.rs.\"\n}";
+        assert!(parse_gemini_tool_output(text).is_none());
+    }
+
+    #[test]
+    fn rejects_unknown_preamble() {
+        assert!(parse_gemini_tool_output("nope").is_none());
+        assert!(parse_gemini_tool_output("").is_none());
+    }
+
+    #[test]
+    fn filename_matcher_only_accepts_edit_tools() {
+        assert!(is_gemini_edit_tool_output("write_file_0.txt"));
+        assert!(is_gemini_edit_tool_output("write_file_42.txt"));
+        assert!(is_gemini_edit_tool_output("replace_3.txt"));
+        assert!(!is_gemini_edit_tool_output("read_file_3.txt"));
+        assert!(!is_gemini_edit_tool_output("google_web_search_2.txt"));
+        assert!(!is_gemini_edit_tool_output("run_shell_command_1.txt"));
+        assert!(!is_gemini_edit_tool_output("write_file.txt"));
+        assert!(!is_gemini_edit_tool_output("write_file_.txt"));
+        assert!(!is_gemini_edit_tool_output("replace_abc.txt"));
+    }
+
+    #[test]
+    fn parse_file_records_language_and_bytes() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("write_file_0.txt");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(
+            f,
+            "Successfully created and wrote to new file: /tmp/demo.py. Here is the updated code:\nprint('hi')\n"
+        )
+        .unwrap();
+        drop(f);
+
+        let analyzer = parse_gemini_tool_output_file(&path);
+        let py = analyzer.stats.get("Python").expect("python recorded");
+        assert_eq!(py.occurrences, 1);
+        assert_eq!(py.bytes, "print('hi')\n".len());
+    }
+
+    #[test]
+    fn parse_file_ignores_error_output() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("replace_0.txt");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(f, "{{\"error\": \"User denied execution.\"}}").unwrap();
+        drop(f);
+
+        let analyzer = parse_gemini_tool_output_file(&path);
+        assert!(analyzer.stats.is_empty());
+    }
+
+    #[test]
+    fn parse_file_handles_missing_file_gracefully() {
+        let analyzer =
+            parse_gemini_tool_output_file(std::path::Path::new("/does/not/exist/write_file_0.txt"));
+        assert!(analyzer.stats.is_empty());
+    }
+
+    #[test]
+    fn walk_picks_up_only_edit_tool_outputs_under_tool_outputs_dir() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("some-project");
+        let tool_outputs = project.join("tool-outputs");
+        std::fs::create_dir_all(&tool_outputs).unwrap();
+
+        // Edit-tool outputs: should be picked up.
+        let edit_paths = [
+            (
+                "write_file_0.txt",
+                "Successfully created and wrote to new file: /tmp/a.rs. Here is the updated code:\nfn a() {}\n",
+            ),
+            (
+                "replace_1.txt",
+                "Successfully modified file: /tmp/b.js (1 replacements). Here is the updated code:\nconst b=1;\n",
+            ),
+        ];
+        for (name, body) in &edit_paths {
+            let mut f = std::fs::File::create(tool_outputs.join(name)).unwrap();
+            write!(f, "{}", body).unwrap();
+        }
+
+        // Non-edit-tool outputs: should be ignored.
+        let other_paths = [
+            "read_file_0.txt",
+            "google_web_search_2.txt",
+            "run_shell_command_1.txt",
+        ];
+        for name in &other_paths {
+            let mut f = std::fs::File::create(tool_outputs.join(name)).unwrap();
+            write!(f, "irrelevant").unwrap();
+        }
+
+        // A write_file outside tool-outputs/ must NOT be picked up.
+        let mut f = std::fs::File::create(project.join("write_file_0.txt")).unwrap();
+        write!(f, "noise").unwrap();
+
+        // Run the same filtering logic the production walker uses.
+        let found: Vec<_> = walkdir::WalkDir::new(dir.path())
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let in_dir = e
+                    .path()
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .is_some_and(|n| n == "tool-outputs");
+                in_dir && is_gemini_edit_tool_output(&e.file_name().to_string_lossy())
+            })
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().any(|f| f == "write_file_0.txt"));
+        assert!(found.iter().any(|f| f == "replace_1.txt"));
+
+        // Parsing the picked-up files yields the right languages.
+        let analyzer = walkdir::WalkDir::new(dir.path())
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let in_dir = e
+                    .path()
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .is_some_and(|n| n == "tool-outputs");
+                in_dir && is_gemini_edit_tool_output(&e.file_name().to_string_lossy())
+            })
+            .map(|e| parse_gemini_tool_output_file(e.path()))
+            .fold(crate::languages::LanguageAnalyzer::new(), |mut a, b| {
+                a.merge(&b);
+                a
+            });
+        assert!(analyzer.stats.contains_key("Rust"));
+        assert!(analyzer.stats.contains_key("JavaScript"));
+    }
+
+    #[test]
+    fn parse_gemini_file_aggregates_session_jsonl() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-2026-05-19T10-00-test.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "{{\"sessionId\":\"x\",\"projectHash\":\"y\",\"startTime\":\"2026-05-19T10:00:00Z\",\"lastUpdated\":\"2026-05-19T10:01:00Z\",\"kind\":\"test\"}}").unwrap();
+        // Empty content on the user message so the token-estimation fallback
+        // doesn't contribute — keeps this assertion focused on the explicit
+        // `tokens` block.
+        writeln!(
+            f,
+            "{{\"id\":0,\"type\":\"user\",\"timestamp\":\"2026-05-19T10:00:00Z\",\"content\":[]}}"
+        )
+        .unwrap();
+        writeln!(f, "{{\"id\":1,\"type\":\"gemini\",\"model\":\"gemini-3-flash\",\"timestamp\":\"2026-05-19T10:00:01Z\",\"content\":[{{\"text\":\"hi back\"}}],\"tokens\":{{\"input\":5,\"output\":10,\"cached\":0}}}}").unwrap();
+        drop(f);
+
+        let stats = parse_gemini_file(&path);
+        assert_eq!(stats.sessions_found, 1);
+        assert_eq!(stats.total_messages, 2);
+        // tokens recorded from explicit `tokens` block on the gemini message
+        let day = stats.daily_stats.get("2026-05-19").expect("day bucket");
+        assert_eq!(day.in_tokens, 5);
+        assert_eq!(day.out_tokens, 10);
+        // languages are NOT populated from session JSONL — that's tool-outputs' job.
+        assert!(stats.languages.stats.is_empty());
+    }
 
     #[test]
     fn test_gemini_pricing() {

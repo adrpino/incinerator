@@ -42,6 +42,7 @@ pub struct ZedStats {
     pub monthly_stats: BTreeMap<String, TokenStats>,
     pub model_stats: HashMap<String, TokenStats>,
     pub threads_found: usize,
+    pub languages: crate::languages::LanguageAnalyzer,
 }
 
 pub fn get_zed_db_path() -> Option<PathBuf> {

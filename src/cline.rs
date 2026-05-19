@@ -58,12 +58,14 @@ pub struct ClineStats {
     pub monthly_model_tokens: BTreeMap<String, HashMap<String, TokenStats>>,
     pub total_tokens: TokenStats,
     pub files_found: u32,
+    pub languages: crate::languages::LanguageAnalyzer,
 }
 
 fn merge_cline_stats(mut a: ClineStats, b: ClineStats) -> ClineStats {
     a.total_cost += b.total_cost;
     a.total_tokens.add(&b.total_tokens);
     a.files_found += b.files_found;
+    a.languages.merge(&b.languages);
 
     for (k, v) in b.daily_costs {
         *a.daily_costs.entry(k).or_insert(0.0) += v;
@@ -149,6 +151,59 @@ pub fn parse_cline_file(
         let reader = std::io::BufReader::new(file);
         if let Ok(messages) = serde_json::from_reader::<_, Vec<ClineMessage>>(reader) {
             for message in messages {
+                // In Cline, tools are often represented in JSON blocks inside `text` or `say`
+                // But sometimes the `say` field indicates the tool directly.
+                // Let's look for `write_to_file` or `write` in the `say` field, and parse `text` as JSON args.
+                if let (Some(say), Some(text)) = (&message.say, &message.text) {
+                    if say == "tool"
+                        || say == "write_to_file"
+                        || say == "replace_in_file"
+                        || say == "apply_diff"
+                    {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(text) {
+                            let tool_name = val
+                                .get("tool")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or(say.as_str());
+
+                            if tool_name == "editedExistingFile"
+                                || tool_name == "newFileCreated"
+                                || tool_name == "writeToFile"
+                                || tool_name == "replaceInFile"
+                                || tool_name == "applyDiff"
+                                || tool_name == "write_to_file"
+                                || tool_name == "replace_in_file"
+                                || tool_name == "apply_diff"
+                            {
+                                let path = val
+                                    .get("path")
+                                    .or_else(|| val.get("file"))
+                                    .and_then(|p| p.as_str());
+
+                                let content_len = val
+                                    .get("content")
+                                    .or_else(|| val.get("diff"))
+                                    .and_then(|c| c.as_str())
+                                    .map_or(0, |c| c.len());
+
+                                if let Some(p) = path {
+                                    local.languages.record_file_edit(p, content_len);
+                                } else {
+                                    println!(
+                                        "DEBUG: Found tool {}, but no path! {:?}",
+                                        tool_name, val
+                                    );
+                                }
+                            }
+                        } else {
+                            println!(
+                                "DEBUG: Failed to parse text as JSON for tool {}: {}",
+                                say,
+                                text.chars().take(50).collect::<String>()
+                            );
+                        }
+                    }
+                }
                 let mut cost = 0.0;
                 let mut t_in = 0;
                 let mut t_out = 0;
@@ -429,4 +484,17 @@ pub fn print_cline_report(global_stats: &ClineStats, parsing_time: f64, daily_da
     println!("  Files Parsed: {}", global_stats.files_found);
     println!("  Parse Time:   {:.2} seconds", parsing_time);
     println!("{}", "=".repeat(50));
+
+    if !global_stats.languages.stats.is_empty() {
+        println!("\n{}=== LANGUAGES ==={}", TERM_HEADER, TERM_RESET);
+        let mut sorted_langs: Vec<_> = global_stats.languages.stats.iter().collect();
+        sorted_langs.sort_by_key(|b| std::cmp::Reverse(b.1.bytes));
+        for (lang, stat) in sorted_langs {
+            println!(
+                "  {:<14} {:>5} occurrences ({:>8} bytes)",
+                lang, stat.occurrences, stat.bytes
+            );
+        }
+        println!("{}", "=".repeat(50));
+    }
 }
