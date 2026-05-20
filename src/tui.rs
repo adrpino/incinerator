@@ -50,6 +50,7 @@ enum Tab {
     DailyCosts,
     DailyTokens,
     Languages,
+    Models,
     Settings,
 }
 
@@ -61,7 +62,8 @@ impl Tab {
             Tab::MonthlyCosts => Tab::DailyCosts,
             Tab::DailyCosts => Tab::DailyTokens,
             Tab::DailyTokens => Tab::Languages,
-            Tab::Languages => Tab::Settings,
+            Tab::Languages => Tab::Models,
+            Tab::Models => Tab::Settings,
             Tab::Settings => Tab::Summary,
         }
     }
@@ -74,7 +76,8 @@ impl Tab {
             Tab::DailyCosts => Tab::MonthlyCosts,
             Tab::DailyTokens => Tab::DailyCosts,
             Tab::Languages => Tab::DailyTokens,
-            Tab::Settings => Tab::Languages,
+            Tab::Models => Tab::Languages,
+            Tab::Settings => Tab::Models,
         }
     }
 
@@ -183,6 +186,7 @@ struct App {
     tracker: RefCell<ValueTracker>,
     // Per-file results cache
     file_cache: HashMap<PathBuf, (SystemTime, FileStats)>,
+    selected_model_idx: usize,
 }
 
 impl App {
@@ -196,6 +200,7 @@ impl App {
             daily_filter: DailyFilter::All,
             tracker: RefCell::new(ValueTracker::default()),
             file_cache: HashMap::new(),
+            selected_model_idx: 0,
         }
     }
 
@@ -320,6 +325,7 @@ impl App {
                                     | Tab::DailyCosts
                                     | Tab::DailyTokens
                                     | Tab::Languages
+                                    | Tab::Models
                             ) =>
                         {
                             self.daily_filter = match c {
@@ -330,6 +336,26 @@ impl App {
                                 '5' => DailyFilter::Zed,
                                 _ => self.daily_filter,
                             };
+                            self.selected_model_idx = 0; // Reset index on filter change
+                            terminal.draw(|f| self.draw(f))?;
+                        }
+                        KeyCode::Up if self.tab == Tab::Models => {
+                            if self.selected_model_idx > 0 {
+                                self.selected_model_idx -= 1;
+                            }
+                            terminal.draw(|f| self.draw(f))?;
+                        }
+                        KeyCode::Down if self.tab == Tab::Models => {
+                            let max_len = match self.daily_filter {
+                                DailyFilter::All => self.stats.model_stats.len(),
+                                DailyFilter::Cline => self.stats.model_stats_cline.len(),
+                                DailyFilter::Claude => self.stats.model_stats_claude.len(),
+                                DailyFilter::Gemini => self.stats.model_stats_gemini.len(),
+                                DailyFilter::Zed => self.stats.model_stats_zed.len(),
+                            };
+                            if max_len > 0 && self.selected_model_idx < max_len - 1 {
+                                self.selected_model_idx += 1;
+                            }
                             terminal.draw(|f| self.draw(f))?;
                         }
                         KeyCode::Char('r') => {
@@ -377,6 +403,7 @@ impl App {
             " Daily Costs ",
             " Daily Tokens ",
             " Languages ",
+            " Models ",
             " Settings ",
         ];
         let tabs = Tabs::new(titles)
@@ -396,13 +423,24 @@ impl App {
             Tab::DailyCosts => self.draw_daily_costs(f, chunks[1]),
             Tab::DailyTokens => self.draw_daily_tokens(f, chunks[1]),
             Tab::Languages => self.draw_languages(f, chunks[1]),
+            Tab::Models => self.draw_models(f, chunks[1]),
             Tab::Settings => self.draw_settings(f, chunks[1]),
         }
 
-        let footer_spans = vec![
+        let mut footer_spans = vec![
             Span::styled(" [q] Quit ", Style::default().dim()),
             Span::styled(" [Tab] Switch View ", Style::default().dim()),
             Span::styled(" [r] Refresh ", Style::default().dim()),
+        ];
+
+        if self.tab == Tab::Models {
+            footer_spans.push(Span::styled(
+                " [▲/▼] Scroll Models ",
+                Style::default().yellow(),
+            ));
+        }
+
+        footer_spans.extend(vec![
             Span::styled(
                 format!(
                     " | Parsed: {} files ({:.2}s)",
@@ -417,7 +455,7 @@ impl App {
                 ),
                 Style::default().dim(),
             ),
-        ];
+        ]);
 
         if self.tab == Tab::Settings {
             // Add space for toggle but keep it clean
@@ -907,6 +945,314 @@ impl App {
         f.render_widget(paragraph, chunks[1]);
     }
 
+    fn draw_models(&self, f: &mut Frame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
+
+        self.render_filter_chips(f, chunks[0]);
+
+        let models_map = match self.daily_filter {
+            DailyFilter::All => &self.stats.model_stats,
+            DailyFilter::Cline => &self.stats.model_stats_cline,
+            DailyFilter::Claude => &self.stats.model_stats_claude,
+            DailyFilter::Gemini => &self.stats.model_stats_gemini,
+            DailyFilter::Zed => &self.stats.model_stats_zed,
+        };
+
+        let mut model_list: Vec<(String, crate::viz::TokenStats, f64)> = models_map
+            .iter()
+            .map(|(name, stats)| {
+                let pricing = crate::pricing::get_pricing(name, stats.in_tokens);
+                let cost = (stats.in_tokens as f64 * pricing.input
+                    + stats.out_tokens as f64 * pricing.output
+                    + stats.cache_read_tokens as f64 * pricing.cache_read
+                    + stats.cache_create_tokens as f64 * pricing.cache_write)
+                    / 1_000_000.0;
+                (name.clone(), stats.clone(), cost)
+            })
+            .collect();
+
+        model_list.sort_by(|a, b| {
+            b.2.partial_cmp(&a.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.1.total().cmp(&a.1.total()))
+        });
+
+        // Split body into two horizontal columns: List (60%) and Detail (40%)
+        let body_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(chunks[1]);
+
+        let palette = self.settings.theme.palette();
+
+        // 1. Draw Master List (Left Column)
+        let mut list_lines = Vec::new();
+        list_lines.push(Line::from(vec![Span::styled(
+            "  Models and Share of Burn (Scroll with ▲/▼)",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]));
+        list_lines.push(Line::from(""));
+
+        let selected_idx = if model_list.is_empty() {
+            0
+        } else {
+            self.selected_model_idx.min(model_list.len() - 1)
+        };
+
+        if model_list.is_empty() {
+            list_lines.push(Line::from(Span::styled(
+                "  No models detected for this provider.",
+                Style::default().dim(),
+            )));
+        } else {
+            let total_cost = model_list.iter().map(|m| m.2).sum::<f64>();
+            let max_cost = model_list.first().map(|m| m.2).unwrap_or(1.0);
+
+            for (i, (name, _, cost)) in model_list.iter().enumerate() {
+                let is_selected = i == selected_idx;
+                let pct_of_total = if total_cost > 0.0 {
+                    (cost / total_cost) * 100.0
+                } else {
+                    0.0
+                };
+
+                let bar_width = 18;
+                let filled_pct = if max_cost > 0.0 {
+                    (cost / max_cost).min(1.0)
+                } else {
+                    0.0
+                };
+                let filled = (filled_pct * bar_width as f64).round() as usize;
+
+                let indicator = if is_selected { " > " } else { "   " };
+                let style = if is_selected {
+                    Style::default().fg(TUI_WHITE).bg(Color::Rgb(50, 50, 50))
+                } else {
+                    Style::default()
+                };
+
+                // Truncate name if too long for the list
+                let display_name = if name.len() > 28 {
+                    format!("{}...", &name[..25])
+                } else {
+                    name.clone()
+                };
+
+                let share_bar_color = if is_selected {
+                    palette.cost
+                } else {
+                    TUI_ORANGE_601
+                };
+
+                let spans = vec![
+                    Span::styled(
+                        indicator,
+                        Style::default()
+                            .fg(palette.cost)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!("{:<28} ", display_name)),
+                    Span::styled("█".repeat(filled), Style::default().fg(share_bar_color)),
+                    Span::raw(" ".repeat(bar_width - filled)),
+                    Span::raw(format!(
+                        " {:>7} ({:>5.1}%)",
+                        format_currency(*cost),
+                        pct_of_total
+                    )),
+                ];
+
+                if is_selected {
+                    list_lines.push(Line::from(spans).style(style));
+                } else {
+                    list_lines.push(Line::from(spans));
+                }
+            }
+        }
+
+        let list_title = format!(" Models Map — {} ", self.daily_filter.label());
+        let list_para = Paragraph::new(list_lines)
+            .block(Block::default().title(list_title).borders(Borders::ALL));
+        f.render_widget(list_para, body_chunks[0]);
+
+        // 2. Draw Detail Card (Right Column)
+        let mut detail_lines = Vec::new();
+        detail_lines.push(Line::from(vec![Span::styled(
+            "  Selected Model Detail",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]));
+        detail_lines.push(Line::from(""));
+
+        if model_list.is_empty() {
+            detail_lines.push(Line::from(Span::styled(
+                "  Select a model to view details.",
+                Style::default().dim(),
+            )));
+        } else {
+            let (name, stats, cost) = &model_list[selected_idx];
+            let pricing = crate::pricing::get_pricing(name, stats.in_tokens);
+
+            detail_lines.push(Line::from(vec![
+                Span::styled(
+                    "  Model:    ",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(name, Style::default().fg(palette.cost)),
+            ]));
+
+            // Try to infer provider based on model name prefix or daily filter
+            let inferred_provider = if name.contains("claude") || name.contains("anthropic") {
+                "Claude Code (Anthropic)"
+            } else if name.contains("gemini") {
+                "Gemini CLI (Google)"
+            } else if name.contains("gpt-") {
+                "OpenAI (via Cline/Zed)"
+            } else if name.contains("deepseek") {
+                "DeepSeek"
+            } else {
+                match self.daily_filter {
+                    DailyFilter::Cline => "Cline",
+                    DailyFilter::Zed => "Zed",
+                    DailyFilter::Claude => "Claude Code",
+                    DailyFilter::Gemini => "Gemini CLI",
+                    DailyFilter::All => "AI Assistant",
+                }
+            };
+
+            detail_lines.push(Line::from(vec![
+                Span::styled(
+                    "  Provider: ",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(inferred_provider),
+            ]));
+            detail_lines.push(Line::from(""));
+
+            detail_lines.push(Line::from(vec![Span::styled(
+                "  ── Pricing Rates (per 1M tokens) ──────",
+                Style::default().dim(),
+            )]));
+            detail_lines.push(Line::from(format!(
+                "  Input:      ${:<5.2}  |  Output:       ${:<5.2}",
+                pricing.input, pricing.output
+            )));
+            detail_lines.push(Line::from(format!(
+                "  Cache Read: ${:<5.2}  |  Cache Write:  ${:<5.2}",
+                pricing.cache_read, pricing.cache_write
+            )));
+            detail_lines.push(Line::from(""));
+
+            detail_lines.push(Line::from(vec![Span::styled(
+                "  ── Token Consumption Breakdown ────────",
+                Style::default().dim(),
+            )]));
+
+            let total_tokens = stats.total();
+            let bar_width = 18;
+            let ratio_bar = |val: i64| -> String {
+                if total_tokens > 0 {
+                    let w =
+                        ((val as f64 / total_tokens as f64) * bar_width as f64).round() as usize;
+                    "█".repeat(w) + &" ".repeat(bar_width - w)
+                } else {
+                    " ".repeat(bar_width)
+                }
+            };
+
+            detail_lines.push(Line::from(vec![
+                Span::raw("  Input:        "),
+                Span::styled(
+                    format!("{:>11}", format_tokens(stats.in_tokens)),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  ["),
+                Span::styled(
+                    ratio_bar(stats.in_tokens),
+                    Style::default().fg(palette.cost),
+                ),
+                Span::raw("]"),
+            ]));
+
+            detail_lines.push(Line::from(vec![
+                Span::raw("  Output:       "),
+                Span::styled(
+                    format!("{:>11}", format_tokens(stats.out_tokens)),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  ["),
+                Span::styled(
+                    ratio_bar(stats.out_tokens),
+                    Style::default().fg(palette.cost),
+                ),
+                Span::raw("]"),
+            ]));
+
+            detail_lines.push(Line::from(vec![
+                Span::raw("  Cache Read:   "),
+                Span::styled(
+                    format!("{:>11}", format_tokens(stats.cache_read_tokens)),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  ["),
+                Span::styled(
+                    ratio_bar(stats.cache_read_tokens),
+                    Style::default().fg(palette.cost),
+                ),
+                Span::raw("]"),
+            ]));
+
+            detail_lines.push(Line::from(vec![
+                Span::raw("  Cache Write:  "),
+                Span::styled(
+                    format!("{:>11}", format_tokens(stats.cache_create_tokens)),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  ["),
+                Span::styled(
+                    ratio_bar(stats.cache_create_tokens),
+                    Style::default().fg(palette.cost),
+                ),
+                Span::raw("]"),
+            ]));
+
+            detail_lines.push(Line::from(""));
+            detail_lines.push(Line::from(vec![Span::styled(
+                "  ───────────────────────────────────────",
+                Style::default().dim(),
+            )]));
+
+            detail_lines.push(Line::from(vec![
+                Span::styled(
+                    "  Total Tokens: ",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format_tokens(total_tokens), Style::default().fg(TUI_CYAN)),
+            ]));
+
+            detail_lines.push(Line::from(vec![
+                Span::styled(
+                    "  Total Cost:   ",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format_currency(*cost),
+                    Style::default()
+                        .fg(palette.cost)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
+
+        let detail_para = Paragraph::new(detail_lines).block(
+            Block::default()
+                .title(" Model Details ")
+                .borders(Borders::ALL),
+        );
+        f.render_widget(detail_para, body_chunks[1]);
+    }
+
     fn draw_settings(&self, f: &mut Frame, area: Rect) {
         let palette = self.settings.theme.palette();
         let check = if self.settings.heat_effects {
@@ -1329,6 +1675,7 @@ mod tests {
             Tab::DailyCosts,
             Tab::DailyTokens,
             Tab::Languages,
+            Tab::Models,
             Tab::Settings,
         ];
         for i in 0..order.len() {
@@ -1346,6 +1693,7 @@ mod tests {
             Tab::DailyCosts,
             Tab::DailyTokens,
             Tab::Languages,
+            Tab::Models,
             Tab::Settings,
         ];
         for i in 0..order.len() {
@@ -1363,6 +1711,7 @@ mod tests {
             Tab::DailyCosts,
             Tab::DailyTokens,
             Tab::Languages,
+            Tab::Models,
             Tab::Settings,
         ] {
             assert_eq!(t.next().prev(), t);
@@ -1378,7 +1727,8 @@ mod tests {
         assert_eq!(Tab::DailyCosts.index(), 3);
         assert_eq!(Tab::DailyTokens.index(), 4);
         assert_eq!(Tab::Languages.index(), 5);
-        assert_eq!(Tab::Settings.index(), 6);
+        assert_eq!(Tab::Models.index(), 6);
+        assert_eq!(Tab::Settings.index(), 7);
     }
 
     #[test]
