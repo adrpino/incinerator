@@ -46,6 +46,10 @@ pub struct UnifiedStats {
     pub monthly_costs_zed: BTreeMap<String, f64>,
     pub monthly_tokens: BTreeMap<String, TokenStats>,
     pub model_stats: HashMap<String, TokenStats>,
+    pub model_stats_cline: HashMap<String, TokenStats>,
+    pub model_stats_claude: HashMap<String, TokenStats>,
+    pub model_stats_gemini: HashMap<String, TokenStats>,
+    pub model_stats_zed: HashMap<String, TokenStats>,
     pub provider_costs: HashMap<Provider, f64>,
     pub total_tokens: TokenStats,
     pub total_cost: f64,
@@ -134,6 +138,12 @@ impl UnifiedStats {
             .into_values()
             .flat_map(|models| models.into_iter())
             .collect();
+        for (model, v) in &flat_models {
+            self.model_stats_cline
+                .entry(model.clone())
+                .or_default()
+                .add(v);
+        }
         self.merge_model_stats(flat_models);
         self.total_tokens.add(&s.total_tokens);
         self.total_cost += s.total_cost;
@@ -164,6 +174,12 @@ impl UnifiedStats {
             .entry(Provider::GeminiCLI)
             .or_insert(0.0) += cost;
         self.merge_monthly_tokens(&s.monthly_stats);
+        for (model, v) in &s.model_stats {
+            self.model_stats_gemini
+                .entry(model.clone())
+                .or_default()
+                .add(v);
+        }
         self.merge_model_stats(s.model_stats.clone());
         let mut total = TokenStats::default();
         for v in s.model_stats.values() {
@@ -198,6 +214,12 @@ impl UnifiedStats {
             .entry(Provider::ClaudeCode)
             .or_insert(0.0) += cost;
         self.merge_monthly_tokens(&s.monthly_stats);
+        for (model, v) in &s.model_stats {
+            self.model_stats_claude
+                .entry(model.clone())
+                .or_default()
+                .add(v);
+        }
         self.merge_model_stats(s.model_stats.clone());
         let mut total = TokenStats::default();
         for v in s.model_stats.values() {
@@ -237,6 +259,12 @@ impl UnifiedStats {
         }
         *self.provider_costs.entry(Provider::Zed).or_insert(0.0) += s.total_cost;
         self.merge_monthly_tokens(&s.monthly_stats);
+        for (model, v) in &s.model_stats {
+            self.model_stats_zed
+                .entry(model.clone())
+                .or_default()
+                .add(v);
+        }
         self.merge_model_stats(s.model_stats.clone());
         let mut total = TokenStats::default();
         for v in s.model_stats.values() {
@@ -739,6 +767,15 @@ mod tests {
         assert!(u.model_stats.contains_key("claude-sonnet-4-6"));
         assert!(u.model_stats.contains_key("gemini-3-pro"));
         assert_eq!(u.model_stats.len(), 2);
+
+        assert!(u.model_stats_claude.contains_key("claude-sonnet-4-6"));
+        assert_eq!(u.model_stats_claude.len(), 1);
+
+        assert!(u.model_stats_gemini.contains_key("gemini-3-pro"));
+        assert_eq!(u.model_stats_gemini.len(), 1);
+
+        assert!(u.model_stats_cline.is_empty());
+        assert!(u.model_stats_zed.is_empty());
     }
 
     #[test]

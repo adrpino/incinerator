@@ -1,6 +1,6 @@
 [package]
 name = "incinerator"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 authors = ["incinerator@protocol4.trade"]
 description = "A CLI tool to track how much money you're burning through tokens across Cline, Claude Code, and Gemini CLI"
