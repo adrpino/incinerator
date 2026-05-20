@@ -780,6 +780,11 @@ mod tests {
         assert_eq!(pricing.output, 3.00);
         assert_eq!(pricing.cache_write, 0.05);
 
+        let pricing = get_gemini_pricing("gemini-3.5-flash", 0);
+        assert_eq!(pricing.input, 1.50);
+        assert_eq!(pricing.output, 9.00);
+        assert_eq!(pricing.cache_write, 0.15);
+
         let pricing = get_gemini_pricing("unknown-model", 0);
         assert_eq!(pricing.input, 1.00);
         assert_eq!(pricing.output, 4.00);

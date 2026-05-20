@@ -62,6 +62,8 @@ pub fn get_gemini_pricing(model: &str, input_count: i64) -> ModelPricing {
         }
     } else if m.contains("gemini-3-flash") {
         (0.50, 3.00, 0.05)
+    } else if m.contains("gemini-3.5-flash") {
+        (1.50, 9.00, 0.15)
     } else if m.contains("gemini-1.5-pro") || m.contains("gemini-2.5-pro") {
         if input_count <= 128_000 {
             (1.25, 5.00, 0.3125)
@@ -324,6 +326,12 @@ mod tests {
         assert_eq!(p.input, 0.25);
         assert_eq!(p.output, 1.50);
         assert_eq!(p.cache_write, 0.025);
+
+        // 3.5 Flash
+        let p = get_gemini_pricing("gemini-3.5-flash", 0);
+        assert_eq!(p.input, 1.50);
+        assert_eq!(p.output, 9.00);
+        assert_eq!(p.cache_write, 0.15);
 
         // 3.1 Pro (low context)
         let p = get_gemini_pricing("gemini-3.1-pro", 100_000);
