@@ -41,8 +41,8 @@ lto = "thin"
 
 # Config for 'cargo dist'
 [workspace.metadata.dist]
-# The preferred cargo-dist version to use in CI (Cargo.toml SemVer syntax)
-cargo-dist-version = "0.22.1"
+# The preferred cargo-dist-version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
 # CI backends to support
 ci = "github"
 # Allow manual modifications to the CI workflow file
