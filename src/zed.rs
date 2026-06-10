@@ -1,6 +1,5 @@
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
-use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -9,29 +8,6 @@ use crate::colors::*;
 use crate::format::{format_float_with_commas, format_int_with_commas};
 use crate::pricing::get_pricing;
 use crate::viz::{TokenStats, print_cost_bar, print_token_bar};
-
-#[derive(Deserialize, Debug)]
-struct ZedModel {
-    #[allow(dead_code)]
-    provider: String,
-    model: String,
-}
-
-#[derive(Deserialize, Debug)]
-struct ZedTokenUsage {
-    input_tokens: Option<i64>,
-    output_tokens: Option<i64>,
-    cache_read_input_tokens: Option<i64>,
-}
-
-#[derive(Deserialize, Debug)]
-struct ZedPayload {
-    #[allow(dead_code)]
-    title: Option<String>,
-    model: Option<ZedModel>,
-    request_token_usage: Option<HashMap<String, ZedTokenUsage>>,
-    cumulative_token_usage: Option<ZedTokenUsage>,
-}
 
 #[derive(Default, Clone)]
 pub struct ZedStats {
@@ -98,17 +74,26 @@ pub fn parse_zed_db() -> Option<ZedStats> {
             continue;
         };
 
-        let payload: ZedPayload = match serde_json::from_slice(&json_data) {
+        let payload: serde_json::Value = match serde_json::from_slice(&json_data) {
             Ok(p) => p,
             Err(_) => continue,
         };
 
         stats.threads_found += 1;
 
+        // Extract model dynamically
         let model_name = payload
-            .model
-            .as_ref()
-            .map(|m| m.model.clone())
+            .get("model")
+            .and_then(|m| {
+                // Handle both object format and plain string format
+                if let Some(obj) = m.as_object() {
+                    obj.get("model")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    m.as_str().map(|s| s.to_string())
+                }
+            })
             .unwrap_or_else(|| "unknown".to_string());
 
         let dt = updated_at
@@ -132,11 +117,24 @@ pub fn parse_zed_db() -> Option<ZedStats> {
 
         let mut processed_usage = false;
 
-        if let Some(usages) = payload.request_token_usage {
+        // Dynamically process request_token_usage
+        if let Some(usages) = payload
+            .get("request_token_usage")
+            .and_then(|u| u.as_object())
+        {
             for usage in usages.values() {
-                let in_tokens = usage.input_tokens.unwrap_or(0);
-                let out_tokens = usage.output_tokens.unwrap_or(0);
-                let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
+                let in_tokens = usage
+                    .get("input_tokens")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let out_tokens = usage
+                    .get("output_tokens")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let cache_read = usage
+                    .get("cache_read_input_tokens")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
 
                 if in_tokens == 0 && out_tokens == 0 && cache_read == 0 {
                     continue;
@@ -154,11 +152,21 @@ pub fn parse_zed_db() -> Option<ZedStats> {
             }
         }
 
+        // Dynamically process cumulative_token_usage as fallback
         if !processed_usage {
-            if let Some(usage) = payload.cumulative_token_usage {
-                let in_tokens = usage.input_tokens.unwrap_or(0);
-                let out_tokens = usage.output_tokens.unwrap_or(0);
-                let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
+            if let Some(usage) = payload.get("cumulative_token_usage") {
+                let in_tokens = usage
+                    .get("input_tokens")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let out_tokens = usage
+                    .get("output_tokens")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let cache_read = usage
+                    .get("cache_read_input_tokens")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
 
                 if in_tokens > 0 || out_tokens > 0 || cache_read > 0 {
                     add_usage_to_stats(
@@ -319,22 +327,99 @@ pub fn print_zed_report(stats: &ZedStats, duration: f64, daily_days: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Helper function to extract data the same way parse_zed_db will
+    fn extract_from_json(json_str: &str) -> (String, i64, i64, i64) {
+        let payload: serde_json::Value = serde_json::from_str(json_str).unwrap();
+
+        let model_name = payload
+            .get("model")
+            .and_then(|m| {
+                if let Some(obj) = m.as_object() {
+                    obj.get("model")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    m.as_str().map(|s| s.to_string())
+                }
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let mut in_tokens = 0;
+        let mut out_tokens = 0;
+        let mut cache_read = 0;
+
+        if let Some(usages) = payload
+            .get("request_token_usage")
+            .and_then(|u| u.as_object())
+        {
+            for usage in usages.values() {
+                in_tokens += usage
+                    .get("input_tokens")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                out_tokens += usage
+                    .get("output_tokens")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                cache_read += usage
+                    .get("cache_read_input_tokens")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+            }
+        }
+
+        (model_name, in_tokens, out_tokens, cache_read)
+    }
 
     #[test]
-    fn test_zed_payload_deserialization() {
+    fn test_zed_dynamic_parsing_modern_format() {
+        // This is what the code currently expects
         let json = r#"{
-            "title": "Test Thread",
+            "title": "Modern Thread",
             "model": { "provider": "anthropic", "model": "claude-3-5-sonnet-20241022" },
             "request_token_usage": {
                 "msg1": { "input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 20 }
             }
         }"#;
-        let payload: ZedPayload = serde_json::from_str(json).unwrap();
-        assert_eq!(payload.model.unwrap().model, "claude-3-5-sonnet-20241022");
-        let usage = payload.request_token_usage.unwrap();
-        let msg1 = usage.get("msg1").unwrap();
-        assert_eq!(msg1.input_tokens, Some(100));
-        assert_eq!(msg1.cache_read_input_tokens, Some(20));
+
+        let (model, input, output, cache) = extract_from_json(json);
+        assert_eq!(model, "claude-3-5-sonnet-20241022");
+        assert_eq!(input, 100);
+        assert_eq!(output, 50);
+        assert_eq!(cache, 20);
+    }
+
+    #[test]
+    fn test_zed_dynamic_parsing_legacy_string_model() {
+        // This is the broken format that was crashing the strict deserializer
+        let json = r#"{
+            "title": "Legacy Thread",
+            "model": "gpt-4o",
+            "request_token_usage": {
+                "msg1": { "input_tokens": 500, "output_tokens": 25 }
+            }
+        }"#;
+
+        let (model, input, output, cache) = extract_from_json(json);
+        assert_eq!(model, "gpt-4o"); // We successfully extract it instead of panicking
+        assert_eq!(input, 500);
+        assert_eq!(output, 25);
+        assert_eq!(cache, 0); // Handles missing cache keys safely
+    }
+
+    #[test]
+    fn test_zed_dynamic_parsing_missing_model() {
+        // Failsafe for entirely unknown structures
+        let json = r#"{
+            "title": "Unknown Model Thread",
+            "request_token_usage": {
+                "msg1": { "input_tokens": 10 }
+            }
+        }"#;
+
+        let (model, input, output, _) = extract_from_json(json);
+        assert_eq!(model, "unknown"); // Falls back safely
+        assert_eq!(input, 10);
+        assert_eq!(output, 0);
     }
 }
