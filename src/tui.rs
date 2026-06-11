@@ -114,6 +114,7 @@ enum DailyFilter {
     Claude,
     Gemini,
     Zed,
+    Copilot,
 }
 
 impl DailyFilter {
@@ -124,6 +125,7 @@ impl DailyFilter {
             DailyFilter::Claude => "Claude",
             DailyFilter::Gemini => "Gemini",
             DailyFilter::Zed => "Zed",
+            DailyFilter::Copilot => "Copilot",
         }
     }
 }
@@ -320,7 +322,7 @@ impl App {
                             self.settings.theme = self.settings.theme.next();
                             terminal.draw(|f| self.draw(f))?;
                         }
-                        KeyCode::Char(c @ ('1' | '2' | '3' | '4' | '5'))
+                        KeyCode::Char(c @ ('1' | '2' | '3' | '4' | '5' | '6'))
                             if matches!(
                                 self.tab,
                                 Tab::MonthlyCosts
@@ -336,6 +338,7 @@ impl App {
                                 '3' => DailyFilter::Claude,
                                 '4' => DailyFilter::Gemini,
                                 '5' => DailyFilter::Zed,
+                                '6' => DailyFilter::Copilot,
                                 _ => self.daily_filter,
                             };
                             self.selected_model_idx = 0; // Reset index on filter change
@@ -354,6 +357,7 @@ impl App {
                                 DailyFilter::Claude => self.stats.model_stats_claude.len(),
                                 DailyFilter::Gemini => self.stats.model_stats_gemini.len(),
                                 DailyFilter::Zed => self.stats.model_stats_zed.len(),
+                                DailyFilter::Copilot => self.stats.model_stats_copilot.len(),
                             };
                             if max_len > 0 && self.selected_model_idx < max_len - 1 {
                                 self.selected_model_idx += 1;
@@ -639,6 +643,7 @@ impl App {
             (DailyFilter::Claude, "3"),
             (DailyFilter::Gemini, "4"),
             (DailyFilter::Zed, "5"),
+            (DailyFilter::Copilot, "6"),
         ];
         let mut chip_spans: Vec<Span> = vec![Span::styled(" Filter: ", Style::default().dim())];
         let palette = self.settings.theme.palette();
@@ -676,6 +681,7 @@ impl App {
             DailyFilter::Claude => &self.stats.monthly_costs_claude,
             DailyFilter::Gemini => &self.stats.monthly_costs_gemini,
             DailyFilter::Zed => &self.stats.monthly_costs_zed,
+            DailyFilter::Copilot => &self.stats.monthly_costs_copilot,
         };
 
         let title = format!(" Monthly Burn (USD) — {} ", self.daily_filter.label());
@@ -697,6 +703,7 @@ impl App {
             DailyFilter::Claude => &self.stats.daily_costs_claude,
             DailyFilter::Gemini => &self.stats.daily_costs_gemini,
             DailyFilter::Zed => &self.stats.daily_costs_zed,
+            DailyFilter::Copilot => &self.stats.daily_costs_copilot,
         };
 
         let title = format!(" Daily Burn (USD) — {} ", self.daily_filter.label());
@@ -796,6 +803,7 @@ impl App {
             DailyFilter::Claude => &self.stats.daily_tokens_claude,
             DailyFilter::Gemini => &self.stats.daily_tokens_gemini,
             DailyFilter::Zed => &self.stats.daily_tokens_zed,
+            DailyFilter::Copilot => &self.stats.daily_tokens_copilot,
         };
 
         let mut sorted_days: Vec<_> = source.iter().collect();
@@ -899,6 +907,7 @@ impl App {
             DailyFilter::Claude => &self.stats.languages_claude,
             DailyFilter::Gemini => &self.stats.languages_gemini,
             DailyFilter::Zed => &self.stats.languages_zed,
+            DailyFilter::Copilot => &self.stats.languages_copilot,
         };
 
         let mut sorted_langs: Vec<_> = analyzer.stats.iter().collect();
@@ -961,6 +970,7 @@ impl App {
             DailyFilter::Claude => &self.stats.model_stats_claude,
             DailyFilter::Gemini => &self.stats.model_stats_gemini,
             DailyFilter::Zed => &self.stats.model_stats_zed,
+            DailyFilter::Copilot => &self.stats.model_stats_copilot,
         };
 
         let mut model_list: Vec<(String, crate::viz::TokenStats, f64)> = models_map
@@ -1105,7 +1115,9 @@ impl App {
             ]));
 
             // Try to infer provider based on model name prefix or daily filter
-            let inferred_provider = if name.contains("claude") || name.contains("anthropic") {
+            let inferred_provider = if name.contains("copilot") {
+                "Copilot (GitHub)"
+            } else if name.contains("claude") || name.contains("anthropic") {
                 "Claude Code (Anthropic)"
             } else if name.contains("gemini") {
                 "Gemini CLI (Google)"
@@ -1119,6 +1131,7 @@ impl App {
                     DailyFilter::Zed => "Zed",
                     DailyFilter::Claude => "Claude Code",
                     DailyFilter::Gemini => "Gemini CLI",
+                    DailyFilter::Copilot => "Copilot",
                     DailyFilter::All => "AI Assistant",
                 }
             };
@@ -1766,5 +1779,6 @@ mod tests {
         assert_eq!(DailyFilter::Claude.label(), "Claude");
         assert_eq!(DailyFilter::Gemini.label(), "Gemini");
         assert_eq!(DailyFilter::Zed.label(), "Zed");
+        assert_eq!(DailyFilter::Copilot.label(), "Copilot");
     }
 }
