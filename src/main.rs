@@ -3,6 +3,7 @@
 mod claude;
 mod cline;
 mod colors;
+mod copilot;
 mod eco;
 mod format;
 mod gemini;
@@ -66,6 +67,12 @@ enum Commands {
         #[arg(long)]
         daily: Option<usize>,
     },
+    /// Analyze GitHub Copilot Chat history logs
+    Copilot {
+        /// Number of days to show in the daily costs chart
+        #[arg(long)]
+        daily: Option<usize>,
+    },
     /// Launch interactive TUI (default when no command given)
     Tui,
 }
@@ -106,6 +113,12 @@ fn main() {
             let days = daily.unwrap_or(default_daily);
             if let Some((stats, time)) = zed::run_zed_report() {
                 zed::print_zed_report(&stats, time, days);
+            }
+        }
+        Some(Commands::Copilot { daily }) => {
+            let days = daily.unwrap_or(default_daily);
+            if let Some((stats, time)) = copilot::run_copilot_report() {
+                copilot::print_copilot_report(&stats, time, days);
             }
         }
         Some(Commands::Tui) => {

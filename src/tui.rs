@@ -20,6 +20,7 @@ use crate::colors::{
     TUI_CYAN, TUI_DARK_GRAY, TUI_FLAME_ORANGE_1, TUI_FLAME_ORANGE_2, TUI_FLAME_RED_1,
     TUI_FLAME_YELLOW_2, TUI_ORANGE_601, TUI_RED, TUI_WHITE, TUI_YELLOW, ThemeType,
 };
+use crate::copilot::{CopilotStats, get_copilot_files, parse_copilot_file};
 use crate::eco::format_eco_metrics;
 use crate::format::{format_currency, format_int_with_commas, format_tokens};
 use crate::gemini::{GeminiStats, get_gemini_storage_path};
@@ -174,6 +175,7 @@ enum FileStats {
     /// language data, so we parse them as their own cache entries.
     GeminiLang(crate::languages::LanguageAnalyzer),
     Zed(ZedStats),
+    Copilot(CopilotStats),
 }
 
 struct App {
@@ -1352,11 +1354,16 @@ fn run_scan_pass(
     let n_gemini = gemini_files.len();
     let n_gemini_lang = gemini_lang_files.len();
 
+    let t = Instant::now();
+    let copilot_files = get_copilot_files();
+    let t_walk_copilot = t.elapsed();
+    let n_copilot = copilot_files.len();
+
     let zed_db_path = get_zed_db_path();
     let n_zed = if zed_db_path.is_some() { 1 } else { 0 };
 
     progress.total.store(
-        (n_cline + n_claude + n_gemini + n_gemini_lang + n_zed) as u32,
+        (n_cline + n_claude + n_gemini + n_gemini_lang + n_zed + n_copilot) as u32,
         Ordering::Relaxed,
     );
 
@@ -1365,6 +1372,7 @@ fn run_scan_pass(
         .chain(claude_files.iter())
         .chain(gemini_files.iter())
         .chain(gemini_lang_files.iter())
+        .chain(copilot_files.iter())
         .cloned()
         .collect();
 
@@ -1380,6 +1388,7 @@ fn run_scan_pass(
         Gemini,
         GeminiLang,
         Zed,
+        Copilot,
     }
     let mut tasks = Vec::new();
     for p in cline_files {
@@ -1393,6 +1402,9 @@ fn run_scan_pass(
     }
     for p in gemini_lang_files {
         tasks.push((p, PType::GeminiLang));
+    }
+    for p in copilot_files {
+        tasks.push((p, PType::Copilot));
     }
     if let Some(p) = zed_db_path {
         tasks.push((p, PType::Zed));
@@ -1419,6 +1431,7 @@ fn run_scan_pass(
                 PType::Claude => FileStats::Claude(parse_claude_file(&path)),
                 PType::Gemini => FileStats::Gemini(parse_gemini_file(&path)),
                 PType::GeminiLang => FileStats::GeminiLang(parse_gemini_tool_output_file(&path)),
+                PType::Copilot => FileStats::Copilot(parse_copilot_file(&path)),
                 PType::Zed => {
                     // parse_zed_db doesn't take a path currently but we can use it if we adapt it or just call it
                     // For now, let's assume it works as it finds its own path, but we'll use the one we found.
@@ -1449,6 +1462,9 @@ fn run_scan_pass(
     let mut zed_n = 0u32;
     let mut zed_us_sum: u64 = 0;
     let mut zed_us_max: u64 = 0;
+    let mut copilot_n = 0u32;
+    let mut copilot_us_sum: u64 = 0;
+    let mut copilot_us_max: u64 = 0;
     for (path, mtime, stats, was_parsed, parse_us) in results {
         if was_parsed {
             files_parsed += 1;
@@ -1481,6 +1497,13 @@ fn run_scan_pass(
                         zed_us_max = parse_us;
                     }
                 }
+                FileStats::Copilot(_) => {
+                    copilot_n += 1;
+                    copilot_us_sum += parse_us;
+                    if parse_us > copilot_us_max {
+                        copilot_us_max = parse_us;
+                    }
+                }
             }
         }
         cache.insert(path, (mtime, stats));
@@ -1499,6 +1522,7 @@ fn run_scan_pass(
                 FileStats::Gemini(s) => new_stats.add_gemini(s.clone(), 0.0),
                 FileStats::GeminiLang(langs) => new_stats.add_gemini_languages(langs),
                 FileStats::Zed(s) => new_stats.add_zed(s.clone(), 0.0),
+                FileStats::Copilot(s) => new_stats.add_copilot(s.clone(), 0.0),
             }
         }
     }
@@ -1521,7 +1545,7 @@ fn run_scan_pass(
             let cache_hits = cache_size.saturating_sub(files_parsed as usize);
             let _ = writeln!(
                 f,
-                "[{}] mode={} walk_cline={}ms walk_claude={}ms walk_gemini={}ms parse={}ms [cline n={} sum={}ms max={}ms | claude n={} sum={}ms max={}ms | gemini n={} sum={}ms max={}ms | zed n={} sum={}ms max={}ms] agg={}ms total={}ms parsed={} cache_hits={} cache_size={}",
+                "[{}] mode={} walk_cline={}ms walk_claude={}ms walk_gemini={}ms walk_copilot={}ms parse={}ms [cline n={} sum={}ms max={}ms | claude n={} sum={}ms max={}ms | gemini n={} sum={}ms max={}ms | zed n={} sum={}ms max={}ms | copilot n={} sum={}ms max={}ms] agg={}ms total={}ms parsed={} cache_hits={} cache_size={}",
                 now,
                 if cfg!(debug_assertions) {
                     "debug"
@@ -1531,6 +1555,7 @@ fn run_scan_pass(
                 t_walk_cline.as_millis(),
                 t_walk_claude.as_millis(),
                 t_walk_gemini.as_millis(),
+                t_walk_copilot.as_millis(),
                 t_parse.as_millis(),
                 cline_n,
                 cline_us_sum / 1000,
@@ -1544,6 +1569,9 @@ fn run_scan_pass(
                 zed_n,
                 zed_us_sum / 1000,
                 zed_us_max / 1000,
+                copilot_n,
+                copilot_us_sum / 1000,
+                copilot_us_max / 1000,
                 t_agg.as_millis(),
                 start.elapsed().as_millis(),
                 files_parsed,
