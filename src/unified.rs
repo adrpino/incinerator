@@ -1,14 +1,14 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-use crate::claude::{ClaudeStats, run_claude_report, get_claude_storage_path};
-use crate::cline::{ClineStats, run_cline_report, get_cline_storage_path};
+use crate::claude::{ClaudeStats, get_claude_storage_path, run_claude_report};
+use crate::cline::{ClineStats, get_cline_storage_path, run_cline_report};
 use crate::colors::*;
-use crate::copilot::{CopilotStats, run_copilot_report, get_copilot_storage_path};
+use crate::copilot::{CopilotStats, get_copilot_storage_path, run_copilot_report};
 use crate::format::{format_float_with_commas, format_int_with_commas};
-use crate::gemini::{GeminiStats, run_gemini_report, get_gemini_storage_path};
+use crate::gemini::{GeminiStats, get_gemini_storage_path, run_gemini_report};
 use crate::viz::TokenStats;
-use crate::zed::{ZedStats, run_zed_report, get_zed_db_path};
+use crate::zed::{ZedStats, get_zed_db_path, run_zed_report};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Provider {
@@ -929,13 +929,13 @@ mod tests {
     #[test]
     fn provider_all_contains_all_variants() {
         let all_providers = Provider::all();
-       
+
         assert!(all_providers.contains(&Provider::Cline));
         assert!(all_providers.contains(&Provider::ClaudeCode));
         assert!(all_providers.contains(&Provider::GeminiCLI));
         assert!(all_providers.contains(&Provider::Zed));
         assert!(all_providers.contains(&Provider::Copilot));
-       
+
         assert_eq!(all_providers.len(), 5);
     }
 }

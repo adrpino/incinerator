@@ -117,8 +117,17 @@ mod tests {
         let request = &parsed["v"]["requests"][0];
         assert_eq!(request["result"]["metadata"]["promptTokens"], 1200);
         assert_eq!(request["result"]["metadata"]["outputTokens"], 450);
-        assert_eq!(request["inputState"]["selectedModel"]["identifier"], "copilot/gemini-3.5-flash");
-        assert_eq!(request["inputState"]["selectedModel"]["metadata"]["inputCost"], 150);
-        assert_eq!(request["inputState"]["selectedModel"]["metadata"]["outputCost"], 900);
+        assert_eq!(
+            request["inputState"]["selectedModel"]["identifier"],
+            "copilot/gemini-3.5-flash"
+        );
+        assert_eq!(
+            request["inputState"]["selectedModel"]["metadata"]["inputCost"],
+            150
+        );
+        assert_eq!(
+            request["inputState"]["selectedModel"]["metadata"]["outputCost"],
+            900
+        );
     }
 }

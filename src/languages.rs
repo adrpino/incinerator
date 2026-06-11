@@ -120,8 +120,8 @@ mod tests {
             analyzer.stats.get("Dockerfile").map(|s| s.occurrences),
             Some(1)
         );
-        assert!(analyzer.stats.get("Unknown").is_none());
-        assert!(analyzer.stats.get("Makefile").is_none());
+        assert!(!analyzer.stats.contains_key("Unknown"));
+        assert!(!analyzer.stats.contains_key("Makefile"));
     }
 
     #[test]
