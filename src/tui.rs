@@ -14,15 +14,16 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::claude::{ClaudeStats, get_claude_storage_path};
-use crate::cline::{ClineStats, get_cline_storage_path};
+use crate::claude::ClaudeStats;
+use crate::cline::ClineStats;
 use crate::colors::{
     TUI_CYAN, TUI_DARK_GRAY, TUI_FLAME_ORANGE_1, TUI_FLAME_ORANGE_2, TUI_FLAME_RED_1,
     TUI_FLAME_YELLOW_2, TUI_ORANGE_601, TUI_RED, TUI_WHITE, TUI_YELLOW, ThemeType,
 };
+use crate::copilot::{CopilotStats, get_copilot_files, parse_copilot_file};
 use crate::eco::format_eco_metrics;
 use crate::format::{format_currency, format_int_with_commas, format_tokens};
-use crate::gemini::{GeminiStats, get_gemini_storage_path};
+use crate::gemini::GeminiStats;
 use crate::unified::UnifiedStats;
 use crate::zed::ZedStats;
 use std::path::PathBuf;
@@ -113,6 +114,7 @@ enum DailyFilter {
     Claude,
     Gemini,
     Zed,
+    Copilot,
 }
 
 impl DailyFilter {
@@ -123,6 +125,7 @@ impl DailyFilter {
             DailyFilter::Claude => "Claude",
             DailyFilter::Gemini => "Gemini",
             DailyFilter::Zed => "Zed",
+            DailyFilter::Copilot => "Copilot",
         }
     }
 }
@@ -174,6 +177,7 @@ enum FileStats {
     /// language data, so we parse them as their own cache entries.
     GeminiLang(crate::languages::LanguageAnalyzer),
     Zed(ZedStats),
+    Copilot(CopilotStats),
 }
 
 struct App {
@@ -271,19 +275,11 @@ impl App {
         })
         .map_err(io::Error::other)?;
 
-        if let Some(path) = get_cline_storage_path() {
-            if path.exists() {
-                let _ = watcher.watch(&path, RecursiveMode::Recursive);
-            }
-        }
-        if let Some(path) = get_claude_storage_path() {
-            if path.exists() {
-                let _ = watcher.watch(&path, RecursiveMode::Recursive);
-            }
-        }
-        if let Some(path) = get_gemini_storage_path() {
-            if path.exists() {
-                let _ = watcher.watch(&path, RecursiveMode::Recursive);
+        for provider in crate::unified::Provider::all() {
+            if let Some(path) = provider.storage_path() {
+                if path.exists() {
+                    let _ = watcher.watch(&path, RecursiveMode::Recursive);
+                }
             }
         }
 
@@ -318,7 +314,7 @@ impl App {
                             self.settings.theme = self.settings.theme.next();
                             terminal.draw(|f| self.draw(f))?;
                         }
-                        KeyCode::Char(c @ ('1' | '2' | '3' | '4' | '5'))
+                        KeyCode::Char(c @ ('1' | '2' | '3' | '4' | '5' | '6'))
                             if matches!(
                                 self.tab,
                                 Tab::MonthlyCosts
@@ -334,6 +330,7 @@ impl App {
                                 '3' => DailyFilter::Claude,
                                 '4' => DailyFilter::Gemini,
                                 '5' => DailyFilter::Zed,
+                                '6' => DailyFilter::Copilot,
                                 _ => self.daily_filter,
                             };
                             self.selected_model_idx = 0; // Reset index on filter change
@@ -352,6 +349,7 @@ impl App {
                                 DailyFilter::Claude => self.stats.model_stats_claude.len(),
                                 DailyFilter::Gemini => self.stats.model_stats_gemini.len(),
                                 DailyFilter::Zed => self.stats.model_stats_zed.len(),
+                                DailyFilter::Copilot => self.stats.model_stats_copilot.len(),
                             };
                             if max_len > 0 && self.selected_model_idx < max_len - 1 {
                                 self.selected_model_idx += 1;
@@ -637,6 +635,7 @@ impl App {
             (DailyFilter::Claude, "3"),
             (DailyFilter::Gemini, "4"),
             (DailyFilter::Zed, "5"),
+            (DailyFilter::Copilot, "6"),
         ];
         let mut chip_spans: Vec<Span> = vec![Span::styled(" Filter: ", Style::default().dim())];
         let palette = self.settings.theme.palette();
@@ -674,6 +673,7 @@ impl App {
             DailyFilter::Claude => &self.stats.monthly_costs_claude,
             DailyFilter::Gemini => &self.stats.monthly_costs_gemini,
             DailyFilter::Zed => &self.stats.monthly_costs_zed,
+            DailyFilter::Copilot => &self.stats.monthly_costs_copilot,
         };
 
         let title = format!(" Monthly Burn (USD) — {} ", self.daily_filter.label());
@@ -695,6 +695,7 @@ impl App {
             DailyFilter::Claude => &self.stats.daily_costs_claude,
             DailyFilter::Gemini => &self.stats.daily_costs_gemini,
             DailyFilter::Zed => &self.stats.daily_costs_zed,
+            DailyFilter::Copilot => &self.stats.daily_costs_copilot,
         };
 
         let title = format!(" Daily Burn (USD) — {} ", self.daily_filter.label());
@@ -794,6 +795,7 @@ impl App {
             DailyFilter::Claude => &self.stats.daily_tokens_claude,
             DailyFilter::Gemini => &self.stats.daily_tokens_gemini,
             DailyFilter::Zed => &self.stats.daily_tokens_zed,
+            DailyFilter::Copilot => &self.stats.daily_tokens_copilot,
         };
 
         let mut sorted_days: Vec<_> = source.iter().collect();
@@ -897,6 +899,7 @@ impl App {
             DailyFilter::Claude => &self.stats.languages_claude,
             DailyFilter::Gemini => &self.stats.languages_gemini,
             DailyFilter::Zed => &self.stats.languages_zed,
+            DailyFilter::Copilot => &self.stats.languages_copilot,
         };
 
         let mut sorted_langs: Vec<_> = analyzer.stats.iter().collect();
@@ -959,6 +962,7 @@ impl App {
             DailyFilter::Claude => &self.stats.model_stats_claude,
             DailyFilter::Gemini => &self.stats.model_stats_gemini,
             DailyFilter::Zed => &self.stats.model_stats_zed,
+            DailyFilter::Copilot => &self.stats.model_stats_copilot,
         };
 
         let mut model_list: Vec<(String, crate::viz::TokenStats, f64)> = models_map
@@ -1103,7 +1107,9 @@ impl App {
             ]));
 
             // Try to infer provider based on model name prefix or daily filter
-            let inferred_provider = if name.contains("claude") || name.contains("anthropic") {
+            let inferred_provider = if name.contains("copilot") {
+                "Copilot (GitHub)"
+            } else if name.contains("claude") || name.contains("anthropic") {
                 "Claude Code (Anthropic)"
             } else if name.contains("gemini") {
                 "Gemini CLI (Google)"
@@ -1117,6 +1123,7 @@ impl App {
                     DailyFilter::Zed => "Zed",
                     DailyFilter::Claude => "Claude Code",
                     DailyFilter::Gemini => "Gemini CLI",
+                    DailyFilter::Copilot => "Copilot",
                     DailyFilter::All => "AI Assistant",
                 }
             };
@@ -1352,11 +1359,16 @@ fn run_scan_pass(
     let n_gemini = gemini_files.len();
     let n_gemini_lang = gemini_lang_files.len();
 
+    let t = Instant::now();
+    let copilot_files = get_copilot_files();
+    let t_walk_copilot = t.elapsed();
+    let n_copilot = copilot_files.len();
+
     let zed_db_path = get_zed_db_path();
     let n_zed = if zed_db_path.is_some() { 1 } else { 0 };
 
     progress.total.store(
-        (n_cline + n_claude + n_gemini + n_gemini_lang + n_zed) as u32,
+        (n_cline + n_claude + n_gemini + n_gemini_lang + n_zed + n_copilot) as u32,
         Ordering::Relaxed,
     );
 
@@ -1365,6 +1377,7 @@ fn run_scan_pass(
         .chain(claude_files.iter())
         .chain(gemini_files.iter())
         .chain(gemini_lang_files.iter())
+        .chain(copilot_files.iter())
         .cloned()
         .collect();
 
@@ -1380,6 +1393,7 @@ fn run_scan_pass(
         Gemini,
         GeminiLang,
         Zed,
+        Copilot,
     }
     let mut tasks = Vec::new();
     for p in cline_files {
@@ -1393,6 +1407,9 @@ fn run_scan_pass(
     }
     for p in gemini_lang_files {
         tasks.push((p, PType::GeminiLang));
+    }
+    for p in copilot_files {
+        tasks.push((p, PType::Copilot));
     }
     if let Some(p) = zed_db_path {
         tasks.push((p, PType::Zed));
@@ -1419,6 +1436,7 @@ fn run_scan_pass(
                 PType::Claude => FileStats::Claude(parse_claude_file(&path)),
                 PType::Gemini => FileStats::Gemini(parse_gemini_file(&path)),
                 PType::GeminiLang => FileStats::GeminiLang(parse_gemini_tool_output_file(&path)),
+                PType::Copilot => FileStats::Copilot(parse_copilot_file(&path)),
                 PType::Zed => {
                     // parse_zed_db doesn't take a path currently but we can use it if we adapt it or just call it
                     // For now, let's assume it works as it finds its own path, but we'll use the one we found.
@@ -1449,6 +1467,9 @@ fn run_scan_pass(
     let mut zed_n = 0u32;
     let mut zed_us_sum: u64 = 0;
     let mut zed_us_max: u64 = 0;
+    let mut copilot_n = 0u32;
+    let mut copilot_us_sum: u64 = 0;
+    let mut copilot_us_max: u64 = 0;
     for (path, mtime, stats, was_parsed, parse_us) in results {
         if was_parsed {
             files_parsed += 1;
@@ -1481,6 +1502,13 @@ fn run_scan_pass(
                         zed_us_max = parse_us;
                     }
                 }
+                FileStats::Copilot(_) => {
+                    copilot_n += 1;
+                    copilot_us_sum += parse_us;
+                    if parse_us > copilot_us_max {
+                        copilot_us_max = parse_us;
+                    }
+                }
             }
         }
         cache.insert(path, (mtime, stats));
@@ -1499,6 +1527,7 @@ fn run_scan_pass(
                 FileStats::Gemini(s) => new_stats.add_gemini(s.clone(), 0.0),
                 FileStats::GeminiLang(langs) => new_stats.add_gemini_languages(langs),
                 FileStats::Zed(s) => new_stats.add_zed(s.clone(), 0.0),
+                FileStats::Copilot(s) => new_stats.add_copilot(s.clone(), 0.0),
             }
         }
     }
@@ -1521,7 +1550,7 @@ fn run_scan_pass(
             let cache_hits = cache_size.saturating_sub(files_parsed as usize);
             let _ = writeln!(
                 f,
-                "[{}] mode={} walk_cline={}ms walk_claude={}ms walk_gemini={}ms parse={}ms [cline n={} sum={}ms max={}ms | claude n={} sum={}ms max={}ms | gemini n={} sum={}ms max={}ms | zed n={} sum={}ms max={}ms] agg={}ms total={}ms parsed={} cache_hits={} cache_size={}",
+                "[{}] mode={} walk_cline={}ms walk_claude={}ms walk_gemini={}ms walk_copilot={}ms parse={}ms [cline n={} sum={}ms max={}ms | claude n={} sum={}ms max={}ms | gemini n={} sum={}ms max={}ms | zed n={} sum={}ms max={}ms | copilot n={} sum={}ms max={}ms] agg={}ms total={}ms parsed={} cache_hits={} cache_size={}",
                 now,
                 if cfg!(debug_assertions) {
                     "debug"
@@ -1531,6 +1560,7 @@ fn run_scan_pass(
                 t_walk_cline.as_millis(),
                 t_walk_claude.as_millis(),
                 t_walk_gemini.as_millis(),
+                t_walk_copilot.as_millis(),
                 t_parse.as_millis(),
                 cline_n,
                 cline_us_sum / 1000,
@@ -1544,6 +1574,9 @@ fn run_scan_pass(
                 zed_n,
                 zed_us_sum / 1000,
                 zed_us_max / 1000,
+                copilot_n,
+                copilot_us_sum / 1000,
+                copilot_us_max / 1000,
                 t_agg.as_millis(),
                 start.elapsed().as_millis(),
                 files_parsed,
@@ -1738,5 +1771,6 @@ mod tests {
         assert_eq!(DailyFilter::Claude.label(), "Claude");
         assert_eq!(DailyFilter::Gemini.label(), "Gemini");
         assert_eq!(DailyFilter::Zed.label(), "Zed");
+        assert_eq!(DailyFilter::Copilot.label(), "Copilot");
     }
 }

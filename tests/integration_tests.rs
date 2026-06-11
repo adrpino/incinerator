@@ -76,4 +76,58 @@ mod tests {
         assert!(estimated > 0);
         assert_eq!(estimated, (11.0 * 1.33) as i64); // 11 words
     }
+
+    #[test]
+    fn test_copilot_jsonl_parsing() {
+        // Test parsing of a line from a Copilot JSONL chat session
+        let copilot_line = json!({
+            "v": {
+                "version": 3,
+                "sessionId": "test-session-789",
+                "requests": [
+                    {
+                        "requestId": "request_1",
+                        "result": {
+                            "metadata": {
+                                "promptTokens": 1200,
+                                "outputTokens": 450,
+                                "details": "Gemini 3.5 Flash • 1.0 credits"
+                            }
+                        },
+                        "inputState": {
+                            "selectedModel": {
+                                "identifier": "copilot/gemini-3.5-flash",
+                                "metadata": {
+                                    "name": "Gemini 3.5 Flash",
+                                    "pricing": "In: 150 · Out: 900 AICs/1M tokens",
+                                    "inputCost": 150,
+                                    "outputCost": 900,
+                                    "cacheCost": 15
+                                }
+                            }
+                        }
+                    }
+                ]
+            }
+        })
+        .to_string();
+
+        let parsed: serde_json::Value = serde_json::from_str(&copilot_line).unwrap();
+        assert_eq!(parsed["v"]["sessionId"], "test-session-789");
+        let request = &parsed["v"]["requests"][0];
+        assert_eq!(request["result"]["metadata"]["promptTokens"], 1200);
+        assert_eq!(request["result"]["metadata"]["outputTokens"], 450);
+        assert_eq!(
+            request["inputState"]["selectedModel"]["identifier"],
+            "copilot/gemini-3.5-flash"
+        );
+        assert_eq!(
+            request["inputState"]["selectedModel"]["metadata"]["inputCost"],
+            150
+        );
+        assert_eq!(
+            request["inputState"]["selectedModel"]["metadata"]["outputCost"],
+            900
+        );
+    }
 }

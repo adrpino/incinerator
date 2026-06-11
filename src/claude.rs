@@ -585,7 +585,7 @@ mod tests {
         let analyzer = run_extract(content);
         let py = analyzer.stats.get("Python").expect("python recorded");
         assert_eq!(py.occurrences, 3);
-        assert_eq!(py.bytes, 2 + 4 + 0);
+        assert_eq!(py.bytes, 2 + 4);
     }
 
     #[test]
