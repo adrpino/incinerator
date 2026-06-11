@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::claude::{ClaudeStats, get_claude_storage_path};
-use crate::cline::{ClineStats, get_cline_storage_path};
+use crate::claude::ClaudeStats;
+use crate::cline::ClineStats;
 use crate::colors::{
     TUI_CYAN, TUI_DARK_GRAY, TUI_FLAME_ORANGE_1, TUI_FLAME_ORANGE_2, TUI_FLAME_RED_1,
     TUI_FLAME_YELLOW_2, TUI_ORANGE_601, TUI_RED, TUI_WHITE, TUI_YELLOW, ThemeType,
@@ -23,7 +23,7 @@ use crate::colors::{
 use crate::copilot::{CopilotStats, get_copilot_files, parse_copilot_file};
 use crate::eco::format_eco_metrics;
 use crate::format::{format_currency, format_int_with_commas, format_tokens};
-use crate::gemini::{GeminiStats, get_gemini_storage_path};
+use crate::gemini::GeminiStats;
 use crate::unified::UnifiedStats;
 use crate::zed::ZedStats;
 use std::path::PathBuf;
@@ -275,19 +275,11 @@ impl App {
         })
         .map_err(io::Error::other)?;
 
-        if let Some(path) = get_cline_storage_path() {
-            if path.exists() {
-                let _ = watcher.watch(&path, RecursiveMode::Recursive);
-            }
-        }
-        if let Some(path) = get_claude_storage_path() {
-            if path.exists() {
-                let _ = watcher.watch(&path, RecursiveMode::Recursive);
-            }
-        }
-        if let Some(path) = get_gemini_storage_path() {
-            if path.exists() {
-                let _ = watcher.watch(&path, RecursiveMode::Recursive);
+        for provider in crate::unified::Provider::all() {
+            if let Some(path) = provider.storage_path() {
+                if path.exists() {
+                    let _ = watcher.watch(&path, RecursiveMode::Recursive);
+                }
             }
         }
 

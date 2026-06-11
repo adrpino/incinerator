@@ -64,6 +64,8 @@ struct CopilotRequest {
     #[serde(rename = "requestId")]
     #[allow(dead_code)]
     request_id: String,
+    #[serde(rename = "modelId")]
+    model_id: Option<String>,
     result: Option<CopilotResult>,
     #[serde(rename = "inputState")]
     input_state: Option<CopilotInputState>,
@@ -80,6 +82,7 @@ struct CopilotSessionData {
 
 #[derive(Deserialize, Debug)]
 struct CopilotLine {
+    kind: Option<i32>,
     v: CopilotSessionData,
 }
 
@@ -144,13 +147,18 @@ pub fn parse_copilot_file(file_path: &Path) -> CopilotStats {
     };
 
     let mut parsed_line: Option<CopilotLine> = None;
-    for line in content.lines().rev() {
+    for line in content.lines() {
         if line.trim().is_empty() {
             continue;
         }
         if let Ok(p) = serde_json::from_str::<CopilotLine>(line) {
-            parsed_line = Some(p);
-            break;
+            if p.kind == Some(0) {
+                parsed_line = Some(p);
+                break;
+            } else if parsed_line.is_none() {
+                // Fallback for older .json files that don't have a 'kind' event structure
+                parsed_line = Some(p);
+            }
         }
     }
 
@@ -182,25 +190,24 @@ pub fn parse_copilot_file(file_path: &Path) -> CopilotStats {
             continue;
         }
 
-        let (model_name, input_cost, output_cost) = if let Some(input_state) = &request.input_state
-        {
+        let mut model_name = request.model_id.clone();
+        let (input_cost, output_cost) = if let Some(input_state) = &request.input_state {
             if let Some(selected_model) = &input_state.selected_model {
-                let id = selected_model
-                    .identifier
-                    .clone()
-                    .unwrap_or_else(|| "copilot/unknown".to_string());
-                let (in_c, out_c) = if let Some(meta) = &selected_model.metadata {
+                if model_name.is_none() {
+                    model_name = selected_model.identifier.clone();
+                }
+                if let Some(meta) = &selected_model.metadata {
                     (meta.input_cost, meta.output_cost)
                 } else {
                     (None, None)
-                };
-                (id, in_c, out_c)
+                }
             } else {
-                ("copilot/unknown".to_string(), None, None)
+                (None, None)
             }
         } else {
-            ("copilot/unknown".to_string(), None, None)
+            (None, None)
         };
+        let model_name = model_name.unwrap_or_else(|| "copilot/unknown".to_string());
 
         let cost = match (input_cost, output_cost) {
             (Some(in_c), Some(out_c)) => {
@@ -430,7 +437,7 @@ mod tests {
     #[test]
     fn test_copilot_parser_basic() {
         let mut file = NamedTempFile::new().unwrap();
-        let payload = r#"{"v":{"version":3,"sessionId":"test-session-123","requests":[{"requestId":"req1","result":{"metadata":{"promptTokens":100,"outputTokens":50,"details":"Gemini 3.5 Flash"}},"inputState":{"selectedModel":{"identifier":"copilot/gemini-3.5-flash","metadata":{"name":"Gemini 3.5 Flash","inputCost":150,"outputCost":900,"cacheCost":15}}}}]}}"#;
+        let payload = r#"{"kind":0,"v":{"version":3,"sessionId":"test-session-123","requests":[{"requestId":"req1","result":{"metadata":{"promptTokens":100,"outputTokens":50,"details":"Gemini 3.5 Flash"}},"inputState":{"selectedModel":{"identifier":"copilot/gemini-3.5-flash","metadata":{"name":"Gemini 3.5 Flash","inputCost":150,"outputCost":900,"cacheCost":15}}}}]}}"#;
         writeln!(file, "{}", payload).unwrap();
 
         let stats = parse_copilot_file(file.path());
@@ -463,7 +470,7 @@ mod tests {
     fn test_copilot_parser_fallback_pricing() {
         let mut file = NamedTempFile::new().unwrap();
         // Here, metadata doesn't contain inputCost/outputCost, so it should fallback to pricing.rs (which defaults to gpt-4o pricing or Sonnet pricing, or we get Copilot/unknown)
-        let payload = r#"{"v":{"version":3,"sessionId":"test-session-456","requests":[{"requestId":"req1","result":{"metadata":{"promptTokens":1000,"outputTokens":500}},"inputState":{"selectedModel":{"identifier":"gpt-4o"}}}]}}"#;
+        let payload = r#"{"kind":0,"v":{"version":3,"sessionId":"test-session-456","requests":[{"requestId":"req1","result":{"metadata":{"promptTokens":1000,"outputTokens":500}},"inputState":{"selectedModel":{"identifier":"gpt-4o"}}}]}}"#;
         writeln!(file, "{}", payload).unwrap();
 
         let stats = parse_copilot_file(file.path());
