@@ -8,6 +8,7 @@ mod eco;
 mod format;
 mod gemini;
 pub mod languages;
+mod opencode;
 mod pricing;
 mod tui;
 mod unified;
@@ -73,6 +74,12 @@ enum Commands {
         #[arg(long)]
         daily: Option<usize>,
     },
+    /// Analyze Opencode CLI usage logs
+    Opencode {
+        /// Number of days to show in the daily costs chart
+        #[arg(long)]
+        daily: Option<usize>,
+    },
     /// Launch interactive TUI (default when no command given)
     Tui,
 }
@@ -119,6 +126,12 @@ fn main() {
             let days = daily.unwrap_or(default_daily);
             if let Some((stats, time)) = copilot::run_copilot_report() {
                 copilot::print_copilot_report(&stats, time, days);
+            }
+        }
+        Some(Commands::Opencode { daily }) => {
+            let days = daily.unwrap_or(default_daily);
+            if let Some((stats, time)) = opencode::run_opencode_report() {
+                opencode::print_opencode_report(&stats, time, days);
             }
         }
         Some(Commands::Tui) => {

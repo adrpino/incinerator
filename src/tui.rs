@@ -24,6 +24,7 @@ use crate::copilot::{CopilotStats, get_copilot_files, parse_copilot_file};
 use crate::eco::format_eco_metrics;
 use crate::format::{format_currency, format_int_with_commas, format_tokens};
 use crate::gemini::GeminiStats;
+use crate::opencode::{OpencodeStats, get_opencode_db_path, parse_opencode_db};
 use crate::unified::UnifiedStats;
 use crate::zed::ZedStats;
 use std::path::PathBuf;
@@ -115,6 +116,7 @@ enum DailyFilter {
     Gemini,
     Zed,
     Copilot,
+    Opencode,
 }
 
 impl DailyFilter {
@@ -126,6 +128,7 @@ impl DailyFilter {
             DailyFilter::Gemini => "Gemini",
             DailyFilter::Zed => "Zed",
             DailyFilter::Copilot => "Copilot",
+            DailyFilter::Opencode => "Opencode",
         }
     }
 }
@@ -178,6 +181,7 @@ enum FileStats {
     GeminiLang(crate::languages::LanguageAnalyzer),
     Zed(ZedStats),
     Copilot(CopilotStats),
+    Opencode(OpencodeStats),
 }
 
 struct App {
@@ -314,7 +318,7 @@ impl App {
                             self.settings.theme = self.settings.theme.next();
                             terminal.draw(|f| self.draw(f))?;
                         }
-                        KeyCode::Char(c @ ('1' | '2' | '3' | '4' | '5' | '6'))
+                        KeyCode::Char(c @ ('1' | '2' | '3' | '4' | '5' | '6' | '7'))
                             if matches!(
                                 self.tab,
                                 Tab::MonthlyCosts
@@ -331,6 +335,7 @@ impl App {
                                 '4' => DailyFilter::Gemini,
                                 '5' => DailyFilter::Zed,
                                 '6' => DailyFilter::Copilot,
+                                '7' => DailyFilter::Opencode,
                                 _ => self.daily_filter,
                             };
                             self.selected_model_idx = 0; // Reset index on filter change
@@ -350,6 +355,7 @@ impl App {
                                 DailyFilter::Gemini => self.stats.model_stats_gemini.len(),
                                 DailyFilter::Zed => self.stats.model_stats_zed.len(),
                                 DailyFilter::Copilot => self.stats.model_stats_copilot.len(),
+                                DailyFilter::Opencode => self.stats.model_stats_opencode.len(),
                             };
                             if max_len > 0 && self.selected_model_idx < max_len - 1 {
                                 self.selected_model_idx += 1;
@@ -636,6 +642,7 @@ impl App {
             (DailyFilter::Gemini, "4"),
             (DailyFilter::Zed, "5"),
             (DailyFilter::Copilot, "6"),
+            (DailyFilter::Opencode, "7"),
         ];
         let mut chip_spans: Vec<Span> = vec![Span::styled(" Filter: ", Style::default().dim())];
         let palette = self.settings.theme.palette();
@@ -674,6 +681,7 @@ impl App {
             DailyFilter::Gemini => &self.stats.monthly_costs_gemini,
             DailyFilter::Zed => &self.stats.monthly_costs_zed,
             DailyFilter::Copilot => &self.stats.monthly_costs_copilot,
+            DailyFilter::Opencode => &self.stats.monthly_costs_opencode,
         };
 
         let title = format!(" Monthly Burn (USD) — {} ", self.daily_filter.label());
@@ -696,6 +704,7 @@ impl App {
             DailyFilter::Gemini => &self.stats.daily_costs_gemini,
             DailyFilter::Zed => &self.stats.daily_costs_zed,
             DailyFilter::Copilot => &self.stats.daily_costs_copilot,
+            DailyFilter::Opencode => &self.stats.daily_costs_opencode,
         };
 
         let title = format!(" Daily Burn (USD) — {} ", self.daily_filter.label());
@@ -796,6 +805,7 @@ impl App {
             DailyFilter::Gemini => &self.stats.daily_tokens_gemini,
             DailyFilter::Zed => &self.stats.daily_tokens_zed,
             DailyFilter::Copilot => &self.stats.daily_tokens_copilot,
+            DailyFilter::Opencode => &self.stats.daily_tokens_opencode,
         };
 
         let mut sorted_days: Vec<_> = source.iter().collect();
@@ -900,6 +910,7 @@ impl App {
             DailyFilter::Gemini => &self.stats.languages_gemini,
             DailyFilter::Zed => &self.stats.languages_zed,
             DailyFilter::Copilot => &self.stats.languages_copilot,
+            DailyFilter::Opencode => &self.stats.languages_opencode,
         };
 
         let mut sorted_langs: Vec<_> = analyzer.stats.iter().collect();
@@ -963,6 +974,7 @@ impl App {
             DailyFilter::Gemini => &self.stats.model_stats_gemini,
             DailyFilter::Zed => &self.stats.model_stats_zed,
             DailyFilter::Copilot => &self.stats.model_stats_copilot,
+            DailyFilter::Opencode => &self.stats.model_stats_opencode,
         };
 
         let mut model_list: Vec<(String, crate::viz::TokenStats, f64)> = models_map
@@ -1124,6 +1136,7 @@ impl App {
                     DailyFilter::Claude => "Claude Code",
                     DailyFilter::Gemini => "Gemini CLI",
                     DailyFilter::Copilot => "Copilot",
+                    DailyFilter::Opencode => "Opencode",
                     DailyFilter::All => "AI Assistant",
                 }
             };
@@ -1367,8 +1380,11 @@ fn run_scan_pass(
     let zed_db_path = get_zed_db_path();
     let n_zed = if zed_db_path.is_some() { 1 } else { 0 };
 
+    let opencode_db_path = get_opencode_db_path();
+    let n_opencode = if opencode_db_path.is_some() { 1 } else { 0 };
+
     progress.total.store(
-        (n_cline + n_claude + n_gemini + n_gemini_lang + n_zed + n_copilot) as u32,
+        (n_cline + n_claude + n_gemini + n_gemini_lang + n_zed + n_copilot + n_opencode) as u32,
         Ordering::Relaxed,
     );
 
@@ -1384,6 +1400,9 @@ fn run_scan_pass(
     if let Some(ref p) = zed_db_path {
         all_paths.insert(p.clone());
     }
+    if let Some(ref p) = opencode_db_path {
+        all_paths.insert(p.clone());
+    }
 
     cache.retain(|p, _| all_paths.contains(p));
 
@@ -1394,6 +1413,7 @@ fn run_scan_pass(
         GeminiLang,
         Zed,
         Copilot,
+        Opencode,
     }
     let mut tasks = Vec::new();
     for p in cline_files {
@@ -1413,6 +1433,9 @@ fn run_scan_pass(
     }
     if let Some(p) = zed_db_path {
         tasks.push((p, PType::Zed));
+    }
+    if let Some(p) = opencode_db_path {
+        tasks.push((p, PType::Opencode));
     }
 
     let t_parse_start = Instant::now();
@@ -1447,6 +1470,13 @@ fn run_scan_pass(
                         FileStats::Zed(ZedStats::default())
                     }
                 }
+                PType::Opencode => {
+                    if let Some(stats) = parse_opencode_db() {
+                        FileStats::Opencode(stats)
+                    } else {
+                        FileStats::Opencode(OpencodeStats::default())
+                    }
+                }
             };
             let parse_us = parse_start.elapsed().as_micros() as u64;
             progress_ref.done.fetch_add(1, Ordering::Relaxed);
@@ -1470,6 +1500,9 @@ fn run_scan_pass(
     let mut copilot_n = 0u32;
     let mut copilot_us_sum: u64 = 0;
     let mut copilot_us_max: u64 = 0;
+    let mut opencode_n = 0u32;
+    let mut opencode_us_sum: u64 = 0;
+    let mut opencode_us_max: u64 = 0;
     for (path, mtime, stats, was_parsed, parse_us) in results {
         if was_parsed {
             files_parsed += 1;
@@ -1509,6 +1542,13 @@ fn run_scan_pass(
                         copilot_us_max = parse_us;
                     }
                 }
+                FileStats::Opencode(_) => {
+                    opencode_n += 1;
+                    opencode_us_sum += parse_us;
+                    if parse_us > opencode_us_max {
+                        opencode_us_max = parse_us;
+                    }
+                }
             }
         }
         cache.insert(path, (mtime, stats));
@@ -1528,6 +1568,7 @@ fn run_scan_pass(
                 FileStats::GeminiLang(langs) => new_stats.add_gemini_languages(langs),
                 FileStats::Zed(s) => new_stats.add_zed(s.clone(), 0.0),
                 FileStats::Copilot(s) => new_stats.add_copilot(s.clone(), 0.0),
+                FileStats::Opencode(s) => new_stats.add_opencode(s.clone(), 0.0),
             }
         }
     }
@@ -1550,7 +1591,7 @@ fn run_scan_pass(
             let cache_hits = cache_size.saturating_sub(files_parsed as usize);
             let _ = writeln!(
                 f,
-                "[{}] mode={} walk_cline={}ms walk_claude={}ms walk_gemini={}ms walk_copilot={}ms parse={}ms [cline n={} sum={}ms max={}ms | claude n={} sum={}ms max={}ms | gemini n={} sum={}ms max={}ms | zed n={} sum={}ms max={}ms | copilot n={} sum={}ms max={}ms] agg={}ms total={}ms parsed={} cache_hits={} cache_size={}",
+                "[{}] mode={} walk_cline={}ms walk_claude={}ms walk_gemini={}ms walk_copilot={}ms parse={}ms [cline n={} sum={}ms max={}ms | claude n={} sum={}ms max={}ms | gemini n={} sum={}ms max={}ms | zed n={} sum={}ms max={}ms | copilot n={} sum={}ms max={}ms | opencode n={} sum={}ms max={}ms] agg={}ms total={}ms parsed={} cache_hits={} cache_size={}",
                 now,
                 if cfg!(debug_assertions) {
                     "debug"
@@ -1577,6 +1618,9 @@ fn run_scan_pass(
                 copilot_n,
                 copilot_us_sum / 1000,
                 copilot_us_max / 1000,
+                opencode_n,
+                opencode_us_sum / 1000,
+                opencode_us_max / 1000,
                 t_agg.as_millis(),
                 start.elapsed().as_millis(),
                 files_parsed,
@@ -1772,5 +1816,6 @@ mod tests {
         assert_eq!(DailyFilter::Gemini.label(), "Gemini");
         assert_eq!(DailyFilter::Zed.label(), "Zed");
         assert_eq!(DailyFilter::Copilot.label(), "Copilot");
+        assert_eq!(DailyFilter::Opencode.label(), "Opencode");
     }
 }
