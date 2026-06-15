@@ -7,6 +7,7 @@ use crate::colors::*;
 use crate::copilot::{CopilotStats, get_copilot_storage_path, run_copilot_report};
 use crate::format::{format_float_with_commas, format_int_with_commas};
 use crate::gemini::{GeminiStats, get_gemini_storage_path, run_gemini_report};
+use crate::opencode::{OpencodeStats, get_opencode_db_path, run_opencode_report};
 use crate::viz::TokenStats;
 use crate::zed::{ZedStats, get_zed_db_path, run_zed_report};
 
@@ -17,6 +18,7 @@ pub enum Provider {
     GeminiCLI,
     Zed,
     Copilot,
+    Opencode,
 }
 
 impl std::fmt::Display for Provider {
@@ -27,6 +29,7 @@ impl std::fmt::Display for Provider {
             Provider::GeminiCLI => write!(f, "Gemini CLI"),
             Provider::Zed => write!(f, "Zed"),
             Provider::Copilot => write!(f, "Copilot"),
+            Provider::Opencode => write!(f, "Opencode"),
         }
     }
 }
@@ -39,6 +42,7 @@ impl Provider {
             Provider::GeminiCLI,
             Provider::Zed,
             Provider::Copilot,
+            Provider::Opencode,
         ]
     }
 
@@ -49,6 +53,7 @@ impl Provider {
             Provider::GeminiCLI => get_gemini_storage_path(),
             Provider::Zed => get_zed_db_path(),
             Provider::Copilot => get_copilot_storage_path(),
+            Provider::Opencode => get_opencode_db_path(),
         }
     }
 }
@@ -61,18 +66,21 @@ pub struct UnifiedStats {
     pub daily_costs_gemini: BTreeMap<String, f64>,
     pub daily_costs_zed: BTreeMap<String, f64>,
     pub daily_costs_copilot: BTreeMap<String, f64>,
+    pub daily_costs_opencode: BTreeMap<String, f64>,
     pub daily_tokens: BTreeMap<String, TokenStats>,
     pub daily_tokens_cline: BTreeMap<String, TokenStats>,
     pub daily_tokens_claude: BTreeMap<String, TokenStats>,
     pub daily_tokens_gemini: BTreeMap<String, TokenStats>,
     pub daily_tokens_zed: BTreeMap<String, TokenStats>,
     pub daily_tokens_copilot: BTreeMap<String, TokenStats>,
+    pub daily_tokens_opencode: BTreeMap<String, TokenStats>,
     pub monthly_costs: BTreeMap<String, f64>,
     pub monthly_costs_cline: BTreeMap<String, f64>,
     pub monthly_costs_claude: BTreeMap<String, f64>,
     pub monthly_costs_gemini: BTreeMap<String, f64>,
     pub monthly_costs_zed: BTreeMap<String, f64>,
     pub monthly_costs_copilot: BTreeMap<String, f64>,
+    pub monthly_costs_opencode: BTreeMap<String, f64>,
     pub monthly_tokens: BTreeMap<String, TokenStats>,
     pub model_stats: HashMap<String, TokenStats>,
     pub model_stats_cline: HashMap<String, TokenStats>,
@@ -80,6 +88,7 @@ pub struct UnifiedStats {
     pub model_stats_gemini: HashMap<String, TokenStats>,
     pub model_stats_zed: HashMap<String, TokenStats>,
     pub model_stats_copilot: HashMap<String, TokenStats>,
+    pub model_stats_opencode: HashMap<String, TokenStats>,
     pub provider_costs: HashMap<Provider, f64>,
     pub total_tokens: TokenStats,
     pub total_cost: f64,
@@ -93,6 +102,7 @@ pub struct UnifiedStats {
     pub languages_gemini: crate::languages::LanguageAnalyzer,
     pub languages_zed: crate::languages::LanguageAnalyzer,
     pub languages_copilot: crate::languages::LanguageAnalyzer,
+    pub languages_opencode: crate::languages::LanguageAnalyzer,
 }
 
 impl UnifiedStats {
@@ -102,12 +112,14 @@ impl UnifiedStats {
         let claude_res = run_claude_report();
         let zed_res = run_zed_report();
         let copilot_res = run_copilot_report();
+        let opencode_res = run_opencode_report();
 
         if cline_res.is_none()
             && gemini_res.is_none()
             && claude_res.is_none()
             && zed_res.is_none()
             && copilot_res.is_none()
+            && opencode_res.is_none()
         {
             return None;
         }
@@ -127,6 +139,9 @@ impl UnifiedStats {
         }
         if let Some((s, t)) = copilot_res {
             unified.add_copilot(s, t);
+        }
+        if let Some((s, t)) = opencode_res {
+            unified.add_opencode(s, t);
         }
         Some(unified)
     }
@@ -353,6 +368,43 @@ impl UnifiedStats {
         self.languages_copilot.merge(&s.languages);
     }
 
+    pub fn add_opencode(&mut self, s: OpencodeStats, parse_time: f64) {
+        self.merge_costs(&s.daily_costs, &s.monthly_costs);
+        for (k, v) in &s.daily_costs {
+            *self.daily_costs_opencode.entry(k.clone()).or_insert(0.0) += v;
+        }
+        for (k, v) in &s.monthly_costs {
+            *self.monthly_costs_opencode.entry(k.clone()).or_insert(0.0) += v;
+        }
+        self.merge_daily_tokens(&s.daily_stats);
+        for (k, v) in &s.daily_stats {
+            self.daily_tokens_opencode
+                .entry(k.clone())
+                .or_default()
+                .add(v);
+        }
+        *self.provider_costs.entry(Provider::Opencode).or_insert(0.0) += s.total_cost;
+        self.merge_monthly_tokens(&s.monthly_stats);
+        for (model, v) in &s.model_stats {
+            self.model_stats_opencode
+                .entry(model.clone())
+                .or_default()
+                .add(v);
+        }
+        self.merge_model_stats(s.model_stats.clone());
+
+        let mut total = TokenStats::default();
+        for v in s.model_stats.values() {
+            total.add(v);
+        }
+        self.total_tokens.add(&total);
+        self.total_cost += s.total_cost;
+        self.parse_time += parse_time;
+        self.files_parsed += s.sessions_found as u32;
+        self.languages.merge(&s.languages);
+        self.languages_opencode.merge(&s.languages);
+    }
+
     pub fn pad_missing_dates(&mut self) {
         use chrono::{Datelike, Duration, NaiveDate};
 
@@ -373,12 +425,14 @@ impl UnifiedStats {
                 self.daily_costs_gemini.entry(key.clone()).or_insert(0.0);
                 self.daily_costs_zed.entry(key.clone()).or_insert(0.0);
                 self.daily_costs_copilot.entry(key.clone()).or_insert(0.0);
+                self.daily_costs_opencode.entry(key.clone()).or_insert(0.0);
                 self.daily_tokens.entry(key.clone()).or_default();
                 self.daily_tokens_cline.entry(key.clone()).or_default();
                 self.daily_tokens_claude.entry(key.clone()).or_default();
                 self.daily_tokens_gemini.entry(key.clone()).or_default();
                 self.daily_tokens_zed.entry(key.clone()).or_default();
                 self.daily_tokens_copilot.entry(key.clone()).or_default();
+                self.daily_tokens_opencode.entry(key.clone()).or_default();
                 if let Some(next) = curr.checked_add_signed(Duration::try_days(1).unwrap()) {
                     curr = next;
                 } else {
@@ -407,6 +461,9 @@ impl UnifiedStats {
                 self.monthly_costs_gemini.entry(key.clone()).or_insert(0.0);
                 self.monthly_costs_zed.entry(key.clone()).or_insert(0.0);
                 self.monthly_costs_copilot.entry(key.clone()).or_insert(0.0);
+                self.monthly_costs_opencode
+                    .entry(key.clone())
+                    .or_insert(0.0);
                 self.monthly_tokens.entry(key.clone()).or_default();
 
                 // Move to first day of next month
@@ -691,6 +748,21 @@ mod tests {
         s
     }
 
+    fn opencode_fixture() -> OpencodeStats {
+        let mut s = OpencodeStats::default();
+        s.daily_costs.insert("2026-05-11".into(), 1.80);
+        s.monthly_costs.insert("2026-05".into(), 1.80);
+        s.daily_stats
+            .insert("2026-05-11".into(), ts(800, 400, 100, 50));
+        s.monthly_stats
+            .insert("2026-05".into(), ts(800, 400, 100, 50));
+        s.model_stats
+            .insert("gemini-3.5-flash".into(), ts(800, 400, 100, 50));
+        s.sessions_found = 1;
+        s.total_cost = 1.80;
+        s
+    }
+
     #[test]
     fn add_cline_populates_provider_specific_and_global_maps() {
         let mut u = UnifiedStats::default();
@@ -736,6 +808,28 @@ mod tests {
         assert_eq!(u.files_parsed, 1);
         assert!((u.parse_time - 0.15).abs() < f64::EPSILON);
         assert!(!u.show_cache_create);
+    }
+
+    #[test]
+    fn add_opencode_populates_provider_specific_and_global_maps() {
+        let mut u = UnifiedStats::default();
+        u.add_opencode(opencode_fixture(), 0.18);
+
+        // Per-provider daily costs match the input
+        assert_eq!(u.daily_costs_opencode.get("2026-05-11"), Some(&1.80));
+        // Global daily costs match (only one provider added)
+        assert_eq!(u.daily_costs.get("2026-05-11"), Some(&1.80));
+        // Other providers untouched
+        assert!(u.daily_costs_cline.is_empty());
+        assert!(u.daily_costs_claude.is_empty());
+        assert!(u.daily_costs_gemini.is_empty());
+
+        assert_eq!(u.provider_costs.get(&Provider::Opencode), Some(&1.80));
+        assert!(!u.provider_costs.contains_key(&Provider::Cline));
+        assert_eq!(u.total_cost, 1.80);
+        assert_eq!(u.total_tokens.total(), 1350);
+        assert_eq!(u.files_parsed, 1);
+        assert!((u.parse_time - 0.18).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -935,7 +1029,8 @@ mod tests {
         assert!(all_providers.contains(&Provider::GeminiCLI));
         assert!(all_providers.contains(&Provider::Zed));
         assert!(all_providers.contains(&Provider::Copilot));
+        assert!(all_providers.contains(&Provider::Opencode));
 
-        assert_eq!(all_providers.len(), 5);
+        assert_eq!(all_providers.len(), 6);
     }
 }
