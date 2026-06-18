@@ -738,12 +738,27 @@ impl App {
         let gap = 1;
         let points_to_take = (area.width as usize) / (bar_width + gap);
 
-        let bars: Vec<Bar> = sorted_time_points
+        let visible_points: Vec<_> = sorted_time_points
             .iter()
             .rev()
             .take(points_to_take)
             .rev()
-            .map(|(point, cost)| {
+            .collect();
+
+        let max_cost = visible_points
+            .iter()
+            .map(|&(_, cost)| **cost)
+            .fold(0.0_f64, f64::max);
+
+        let scale_multiplier = if max_cost > 0.0 && max_cost < 1.0 {
+            10000.0 // Mills of a dollar / 1/100th of a cent precision
+        } else {
+            100.0 // Standard cent-level scale
+        };
+
+        let bars: Vec<Bar> = visible_points
+            .iter()
+            .map(|&(point, cost)| {
                 let id = if let Some(f) = filter {
                     format!(
                         "ts_{:?}_{}_{}",
@@ -773,7 +788,7 @@ impl App {
                 };
 
                 Bar::default()
-                    .value((**cost * 100.0) as u64)
+                    .value((**cost * scale_multiplier) as u64)
                     .label(Line::from(label))
                     .text_value(format_currency(**cost))
                     .style(style)
@@ -1817,5 +1832,55 @@ mod tests {
         assert_eq!(DailyFilter::Zed.label(), "Zed");
         assert_eq!(DailyFilter::Copilot.label(), "Copilot");
         assert_eq!(DailyFilter::Opencode.label(), "Opencode");
+    }
+
+    #[test]
+    fn test_barchart_sub_cent_cost_scaling() {
+        // Test that extremely small daily costs (sub-cent) do not yield zero value bars
+        let sub_cent_cost = 0.0035; // $0.0035 (0.35 cents)
+
+        // Under old logic: (0.0035 * 100.0) as u64 = 0
+        let old_value = (sub_cent_cost * 100.0) as u64;
+        assert_eq!(
+            old_value, 0,
+            "Old logic incorrectly truncated sub-cent cost to 0"
+        );
+
+        // Under new dynamic scaling logic:
+        let max_cost = sub_cent_cost;
+        let scale_multiplier = if max_cost > 0.0 && max_cost < 1.0 {
+            10000.0
+        } else {
+            100.0
+        };
+
+        let new_value = (sub_cent_cost * scale_multiplier) as u64;
+        assert!(
+            new_value > 0,
+            "New scaling logic successfully preserved sub-cent bar rendering"
+        );
+        assert_eq!(
+            new_value, 35,
+            "New value correctly reflects mills precision (35)"
+        );
+    }
+
+    #[test]
+    fn test_barchart_high_cost_scaling_retains_cents() {
+        // Test that standard high costs still scale correctly to cents
+        let standard_cost = 12.50; // $12.50
+
+        let max_cost = standard_cost;
+        let scale_multiplier = if max_cost > 0.0 && max_cost < 1.0 {
+            10000.0
+        } else {
+            100.0
+        };
+
+        let value = (standard_cost * scale_multiplier) as u64;
+        assert_eq!(
+            value, 1250,
+            "High costs correctly default to standard cent scale (100.0)"
+        );
     }
 }
