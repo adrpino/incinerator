@@ -25,12 +25,26 @@ pub fn get_claude_pricing(model: &str) -> ModelPricing {
             cache_write: 3.75,
             cache_read: 0.30,
         }
-    } else if m.contains("opus-4-7") || m.contains("opus-3") {
+    } else if m.contains("fable") {
+        ModelPricing {
+            input: 10.00,
+            output: 50.00,
+            cache_write: 12.50,
+            cache_read: 1.00,
+        }
+    } else if m.contains("opus-4") {
         ModelPricing {
             input: 5.00,
             output: 25.00,
             cache_write: 6.25,
             cache_read: 0.50,
+        }
+    } else if m.contains("opus-3") {
+        ModelPricing {
+            input: 15.00,
+            output: 75.00,
+            cache_write: 18.75,
+            cache_read: 1.50,
         }
     } else if m.contains("haiku-4-5") || m.contains("haiku-3-5") {
         ModelPricing {
@@ -40,6 +54,10 @@ pub fn get_claude_pricing(model: &str) -> ModelPricing {
             cache_read: 0.10,
         }
     } else {
+        eprintln!(
+            "Warning: Unknown Claude model '{}', defaulting to Sonnet pricing.",
+            model
+        );
         // Default to Sonnet
         ModelPricing {
             input: 3.00,
@@ -64,16 +82,23 @@ pub fn get_gemini_pricing(model: &str, input_count: i64) -> ModelPricing {
         (0.50, 3.00, 0.05)
     } else if m.contains("gemini-3.5-flash") {
         (1.50, 9.00, 0.15)
-    } else if m.contains("gemini-1.5-pro") || m.contains("gemini-2.5-pro") {
+    } else if m.contains("gemini-2.5-pro") {
+        if input_count <= 200_000 {
+            (1.25, 10.00, 0.125)
+        } else {
+            (2.50, 15.00, 0.25)
+        }
+    } else if m.contains("gemini-2.5-flash") {
+        (0.30, 2.50, 0.03)
+    } else if m.contains("gemini-2.0-flash") {
+        (0.10, 0.40, 0.025)
+    } else if m.contains("gemini-1.5-pro") {
         if input_count <= 128_000 {
             (1.25, 5.00, 0.3125)
         } else {
             (2.50, 10.00, 0.625)
         }
-    } else if m.contains("gemini-1.5-flash")
-        || m.contains("gemini-2.0-flash")
-        || m.contains("gemini-2.5-flash")
-    {
+    } else if m.contains("gemini-1.5-flash") {
         if input_count <= 128_000 {
             (0.075, 0.30, 0.01875)
         } else {
@@ -311,6 +336,24 @@ mod tests {
         assert_eq!(p.input, 5.00);
         assert_eq!(p.output, 25.00);
 
+        let p = get_claude_pricing("claude-opus-4-8");
+        assert_eq!(p.input, 5.00);
+        assert_eq!(p.output, 25.00);
+        assert_eq!(p.cache_write, 6.25);
+        assert_eq!(p.cache_read, 0.50);
+
+        let p = get_claude_pricing("claude-fable-5");
+        assert_eq!(p.input, 10.00);
+        assert_eq!(p.output, 50.00);
+        assert_eq!(p.cache_write, 12.50);
+        assert_eq!(p.cache_read, 1.00);
+
+        let p = get_claude_pricing("claude-opus-3");
+        assert_eq!(p.input, 15.00);
+        assert_eq!(p.output, 75.00);
+        assert_eq!(p.cache_write, 18.75);
+        assert_eq!(p.cache_read, 1.50);
+
         let p = get_claude_pricing("claude-haiku-4-5");
         assert_eq!(p.input, 1.00);
         assert_eq!(p.output, 5.00);
@@ -343,6 +386,30 @@ mod tests {
         assert_eq!(p.input, 4.00);
         assert_eq!(p.output, 18.00);
 
+        // 2.5 Pro (low context)
+        let p = get_gemini_pricing("gemini-2.5-pro", 150_000);
+        assert_eq!(p.input, 1.25);
+        assert_eq!(p.output, 10.00);
+        assert_eq!(p.cache_write, 0.125);
+
+        // 2.5 Pro (high context)
+        let p = get_gemini_pricing("gemini-2.5-pro", 250_000);
+        assert_eq!(p.input, 2.50);
+        assert_eq!(p.output, 15.00);
+        assert_eq!(p.cache_write, 0.25);
+
+        // 2.5 Flash
+        let p = get_gemini_pricing("gemini-2.5-flash", 0);
+        assert_eq!(p.input, 0.30);
+        assert_eq!(p.output, 2.50);
+        assert_eq!(p.cache_write, 0.03);
+
+        // 2.0 Flash
+        let p = get_gemini_pricing("gemini-2.0-flash", 0);
+        assert_eq!(p.input, 0.10);
+        assert_eq!(p.output, 0.40);
+        assert_eq!(p.cache_write, 0.025);
+
         // 1.5 Pro (low context)
         let p = get_gemini_pricing("gemini-1.5-pro", 50_000);
         assert_eq!(p.input, 1.25);
@@ -352,5 +419,17 @@ mod tests {
         let p = get_gemini_pricing("gemini-1.5-pro", 200_000);
         assert_eq!(p.input, 2.50);
         assert_eq!(p.output, 10.00);
+
+        // 1.5 Flash (low context)
+        let p = get_gemini_pricing("gemini-1.5-flash", 50_000);
+        assert_eq!(p.input, 0.075);
+        assert_eq!(p.output, 0.30);
+        assert_eq!(p.cache_write, 0.01875);
+
+        // 1.5 Flash (high context)
+        let p = get_gemini_pricing("gemini-1.5-flash", 150_000);
+        assert_eq!(p.input, 0.15);
+        assert_eq!(p.output, 0.60);
+        assert_eq!(p.cache_write, 0.0375);
     }
 }

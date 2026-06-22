@@ -18,6 +18,9 @@ struct GeminiTokens {
     input: Option<i64>,
     output: Option<i64>,
     cached: Option<i64>,
+    thoughts: Option<i64>,
+    #[allow(dead_code)]
+    tool: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -258,7 +261,7 @@ pub fn parse_gemini_file(file_path: &std::path::Path) -> GeminiStats {
 
         if let Some(t) = msg.tokens {
             in_tokens = t.input.unwrap_or(0);
-            out_tokens = t.output.unwrap_or(0);
+            out_tokens = t.output.unwrap_or(0) + t.thoughts.unwrap_or(0);
             cache_tokens = t.cached.unwrap_or(0);
         }
 
@@ -271,14 +274,20 @@ pub fn parse_gemini_file(file_path: &std::path::Path) -> GeminiStats {
             }
         }
 
-        let total_context = in_tokens + cache_tokens;
-        let pricing = get_pricing(&msg_model, total_context);
-        let turn_cost = (in_tokens as f64 / 1_000_000.0 * pricing.input)
+        // Issue 2: Gemini cached tokens are a subset of input. Deduct cache_tokens to avoid double-counting.
+        let uncached_in = in_tokens.saturating_sub(cache_tokens);
+
+        // Issue 5: Tier selection must use true prompt/context size (in_tokens), not the inflated `in_tokens + cache_tokens`.
+        let pricing = get_pricing(&msg_model, in_tokens);
+
+        // Calculate turn cost using disjoint token categories.
+        let turn_cost = (uncached_in as f64 / 1_000_000.0 * pricing.input)
             + (out_tokens as f64 / 1_000_000.0 * pricing.output)
             + (cache_tokens as f64 / 1_000_000.0 * pricing.cache_write);
 
+        // For display consistency with the new cost model, store disjoint categories in TokenStats.
         let entry = TokenStats {
-            in_tokens,
+            in_tokens: uncached_in,
             out_tokens,
             cache_read_tokens: cache_tokens,
             cache_create_tokens: 0,
@@ -744,7 +753,7 @@ mod tests {
             "{{\"id\":0,\"type\":\"user\",\"timestamp\":\"2026-05-19T10:00:00Z\",\"content\":[]}}"
         )
         .unwrap();
-        writeln!(f, "{{\"id\":1,\"type\":\"gemini\",\"model\":\"gemini-3-flash\",\"timestamp\":\"2026-05-19T10:00:01Z\",\"content\":[{{\"text\":\"hi back\"}}],\"tokens\":{{\"input\":5,\"output\":10,\"cached\":0}}}}").unwrap();
+        writeln!(f, "{{\"id\":1,\"type\":\"gemini\",\"model\":\"gemini-3-flash\",\"timestamp\":\"2026-05-19T10:00:01Z\",\"content\":[{{\"text\":\"hi back\"}}],\"tokens\":{{\"input\":5,\"output\":10,\"cached\":2,\"thoughts\":4}}}}").unwrap();
         drop(f);
 
         let stats = parse_gemini_file(&path);
@@ -752,8 +761,9 @@ mod tests {
         assert_eq!(stats.total_messages, 2);
         // tokens recorded from explicit `tokens` block on the gemini message
         let day = stats.daily_stats.get("2026-05-19").expect("day bucket");
-        assert_eq!(day.in_tokens, 5);
-        assert_eq!(day.out_tokens, 10);
+        assert_eq!(day.in_tokens, 3);
+        assert_eq!(day.out_tokens, 14);
+        assert_eq!(day.cache_read_tokens, 2);
         // languages are NOT populated from session JSONL — that's tool-outputs' job.
         assert!(stats.languages.stats.is_empty());
     }
@@ -789,5 +799,36 @@ mod tests {
         assert_eq!(pricing.input, 1.00);
         assert_eq!(pricing.output, 4.00);
         assert_eq!(pricing.cache_write, 0.10);
+    }
+
+    #[test]
+    fn test_gemini_cost_calculation_worked_example() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-worked-example.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "{{\"sessionId\":\"x\",\"projectHash\":\"y\",\"startTime\":\"2026-05-19T10:00:00Z\",\"lastUpdated\":\"2026-05-19T10:01:00Z\",\"kind\":\"test\"}}").unwrap();
+        writeln!(
+            f,
+            "{{\"id\":0,\"type\":\"user\",\"timestamp\":\"2026-05-19T10:00:00Z\",\"content\":[]}}"
+        )
+        .unwrap();
+        // Exact block from the issue description:
+        // {"input":19245,"output":42,"cached":16221,"thoughts":126}
+        writeln!(f, "{{\"id\":1,\"type\":\"gemini\",\"model\":\"gemini-3.5-flash\",\"timestamp\":\"2026-05-19T10:00:01Z\",\"content\":[{{\"text\":\"worked example\"}}],\"tokens\":{{\"input\":19245,\"output\":42,\"cached\":16221,\"thoughts\":126}}}}").unwrap();
+        drop(f);
+
+        let stats = parse_gemini_file(&path);
+        let daily_cost = stats
+            .daily_costs
+            .get("2026-05-19")
+            .expect("daily cost for worked example date");
+
+        // Assert the cost is exactly (3024 * 1.50 + 168 * 9.00 + 16221 * 0.15) / 1_000_000 = 0.00848115
+        assert!(
+            (daily_cost - 0.00848115).abs() < 1e-9,
+            "Cost {} was not close enough to 0.00848115",
+            daily_cost
+        );
     }
 }
