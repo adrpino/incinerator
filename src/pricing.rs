@@ -1,3 +1,15 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static TUI_MODE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_tui_mode(enabled: bool) {
+    TUI_MODE.store(enabled, Ordering::Relaxed);
+}
+
+pub fn is_tui_mode() -> bool {
+    TUI_MODE.load(Ordering::Relaxed)
+}
+
 pub struct ModelPricing {
     pub input: f64,       // Price per 1M tokens
     pub output: f64,      // Price per 1M tokens
@@ -53,11 +65,15 @@ pub fn get_claude_pricing(model: &str) -> ModelPricing {
             cache_write: 1.25,
             cache_read: 0.10,
         }
+    } else if m.contains("synthetic") {
+        ModelPricing::default()
     } else {
-        eprintln!(
-            "Warning: Unknown Claude model '{}', defaulting to Sonnet pricing.",
-            model
-        );
+        if !is_tui_mode() {
+            eprintln!(
+                "Warning: Unknown Claude model '{}', defaulting to Sonnet pricing.",
+                model
+            );
+        }
         // Default to Sonnet
         ModelPricing {
             input: 3.00,
@@ -358,8 +374,97 @@ mod tests {
         assert_eq!(p.input, 1.00);
         assert_eq!(p.output, 5.00);
 
+        let p = get_claude_pricing("<synthetic>");
+        assert_eq!(p.input, 0.0);
+        assert_eq!(p.output, 0.0);
+
+        let p = get_claude_pricing("synthetic");
+        assert_eq!(p.input, 0.0);
+        assert_eq!(p.output, 0.0);
+
         let p = get_claude_pricing("unknown");
         assert_eq!(p.input, 3.00); // default
+    }
+
+    #[test]
+    fn test_unknown_model_tui_mode_suppression() {
+        if std::env::var("RUN_SUBPROCESS_TEST").is_ok() {
+            set_tui_mode(true);
+            get_claude_pricing("some-completely-unknown-model");
+            return;
+        }
+
+        let current_exe = std::env::current_exe().unwrap();
+        let output = std::process::Command::new(current_exe)
+            .arg("test_unknown_model_tui_mode_suppression")
+            .arg("--nocapture")
+            .env("RUN_SUBPROCESS_TEST", "1")
+            .output()
+            .expect("failed to execute subprocess");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let combined = format!("STDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
+        assert!(
+            !combined.contains("Warning: Unknown Claude model"),
+            "Output contains TUI polluting warning:\n{}",
+            combined
+        );
+    }
+
+    #[test]
+    fn test_unknown_model_warning_when_not_tui_mode() {
+        if std::env::var("RUN_SUBPROCESS_TEST").is_ok() {
+            set_tui_mode(false);
+            get_claude_pricing("some-completely-unknown-model-to-trigger-warning");
+            return;
+        }
+
+        let current_exe = std::env::current_exe().unwrap();
+        let output = std::process::Command::new(current_exe)
+            .arg("test_unknown_model_warning_when_not_tui_mode")
+            .arg("--nocapture")
+            .env("RUN_SUBPROCESS_TEST", "1")
+            .output()
+            .expect("failed to execute subprocess");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let combined = format!("STDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
+        assert!(
+            combined.contains(
+                "Warning: Unknown Claude model 'some-completely-unknown-model-to-trigger-warning'"
+            ),
+            "Output did not contain warning:\n{}",
+            combined
+        );
+    }
+
+    #[test]
+    fn test_synthetic_model_never_warns() {
+        if std::env::var("RUN_SUBPROCESS_TEST").is_ok() {
+            set_tui_mode(false);
+            get_claude_pricing("<synthetic>");
+            get_claude_pricing("synthetic-something");
+            return;
+        }
+
+        let current_exe = std::env::current_exe().unwrap();
+        let output = std::process::Command::new(current_exe)
+            .arg("test_synthetic_model_never_warns")
+            .arg("--nocapture")
+            .env("RUN_SUBPROCESS_TEST", "1")
+            .output()
+            .expect("failed to execute subprocess");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let combined = format!("STDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
+        assert!(
+            !combined.contains("Warning: Unknown Claude model"),
+            "Synthetic model should never trigger warnings:\n{}",
+            combined
+        );
     }
 
     #[test]
