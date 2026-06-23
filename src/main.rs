@@ -144,6 +144,7 @@ fn main() {
 }
 
 fn launch_tui() {
+    pricing::set_tui_mode(true);
     if let Err(e) = tui::run_tui() {
         eprintln!("Error running TUI: {}", e);
     }
