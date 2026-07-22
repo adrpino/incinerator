@@ -30,7 +30,7 @@ impl Default for ModelPricing {
 
 pub fn get_claude_pricing(model: &str) -> ModelPricing {
     let m = model.to_lowercase();
-    if m.contains("sonnet-4-6") || m.contains("sonnet-3-5") {
+    if m.contains("sonnet-5") || m.contains("sonnet-4-6") || m.contains("sonnet-3-5") {
         ModelPricing {
             input: 3.00,
             output: 15.00,
@@ -96,6 +96,8 @@ pub fn get_gemini_pricing(model: &str, input_count: i64) -> ModelPricing {
         }
     } else if m.contains("gemini-3-flash") {
         (0.50, 3.00, 0.05)
+    } else if m.contains("gemini-3.6-flash") {
+        (1.50, 7.50, 0.15)
     } else if m.contains("gemini-3.5-flash") {
         (1.50, 9.00, 0.15)
     } else if m.contains("gemini-2.5-pro") {
@@ -243,6 +245,20 @@ pub fn get_openai_pricing(model: &str) -> ModelPricing {
     }
 }
 
+pub fn get_glm_pricing(model: &str) -> ModelPricing {
+    let m = model.to_lowercase();
+    if m.contains("glm-5.2") {
+        ModelPricing {
+            input: 1.40,
+            output: 4.40,
+            cache_write: 0.0,
+            cache_read: 0.26,
+        }
+    } else {
+        ModelPricing::default()
+    }
+}
+
 pub fn get_pricing(model: &str, input_count: i64) -> ModelPricing {
     let m = model.to_lowercase();
     if m.contains("claude") {
@@ -253,8 +269,14 @@ pub fn get_pricing(model: &str, input_count: i64) -> ModelPricing {
         get_deepseek_pricing(model)
     } else if m.contains("gpt-") || m.contains("o1-") {
         get_openai_pricing(model)
+    } else if m.contains("glm-") {
+        get_glm_pricing(model)
     } else {
-        // Try deepseek then gemini then openai then claude
+        // Try GLM then deepseek then gemini then openai then claude
+        let p = get_glm_pricing(model);
+        if p.input > 0.0 {
+            return p;
+        }
         let p = get_deepseek_pricing(model);
         if p.input > 0.0 {
             return p;
@@ -291,6 +313,23 @@ mod tests {
 
         let p = get_pricing("gpt-5", 0);
         assert_eq!(p.input, 1.25);
+
+        let p = get_pricing("z-ai/glm-5.2", 0);
+        assert_eq!(p.input, 1.40);
+        assert_eq!(p.output, 4.40);
+        assert_eq!(p.cache_read, 0.26);
+    }
+
+    #[test]
+    fn test_glm_pricing_logic() {
+        let p = get_glm_pricing("z-ai/glm-5.2");
+        assert_eq!(p.input, 1.40);
+        assert_eq!(p.output, 4.40);
+        assert_eq!(p.cache_read, 0.26);
+        assert_eq!(p.cache_write, 0.0);
+
+        let p = get_glm_pricing("unknown");
+        assert_eq!(p.input, 0.0);
     }
 
     #[test]
@@ -342,6 +381,12 @@ mod tests {
 
     #[test]
     fn test_claude_pricing_logic() {
+        let p = get_claude_pricing("claude-sonnet-5");
+        assert_eq!(p.input, 3.00);
+        assert_eq!(p.output, 15.00);
+        assert_eq!(p.cache_write, 3.75);
+        assert_eq!(p.cache_read, 0.30);
+
         let p = get_claude_pricing("claude-sonnet-4-6-20251001");
         assert_eq!(p.input, 3.00);
         assert_eq!(p.output, 15.00);
@@ -474,6 +519,12 @@ mod tests {
         assert_eq!(p.input, 0.25);
         assert_eq!(p.output, 1.50);
         assert_eq!(p.cache_write, 0.025);
+
+        // 3.6 Flash
+        let p = get_gemini_pricing("gemini-3.6-flash", 0);
+        assert_eq!(p.input, 1.50);
+        assert_eq!(p.output, 7.50);
+        assert_eq!(p.cache_write, 0.15);
 
         // 3.5 Flash
         let p = get_gemini_pricing("gemini-3.5-flash", 0);
