@@ -30,7 +30,7 @@ impl Default for ModelPricing {
 
 pub fn get_claude_pricing(model: &str) -> ModelPricing {
     let m = model.to_lowercase();
-    if m.contains("sonnet-5") || m.contains("sonnet-4-6") || m.contains("sonnet-3-5") {
+    if m.contains("sonnet") {
         ModelPricing {
             input: 3.00,
             output: 15.00,
@@ -44,7 +44,11 @@ pub fn get_claude_pricing(model: &str) -> ModelPricing {
             cache_write: 12.50,
             cache_read: 1.00,
         }
-    } else if m.contains("opus-4") {
+    } else if m.contains("opus-4")
+        || m.contains("4.6-opus")
+        || m.contains("4.5-opus")
+        || m.contains("4-opus")
+    {
         ModelPricing {
             input: 5.00,
             output: 25.00,
@@ -129,8 +133,8 @@ pub fn get_gemini_pricing(model: &str, input_count: i64) -> ModelPricing {
     ModelPricing {
         input,
         output,
-        cache_write: cache,
-        cache_read: 0.0, // Gemini only has one cache price point in current logic
+        cache_write: 0.0,
+        cache_read: cache,
     }
 }
 
@@ -393,11 +397,29 @@ mod tests {
         assert_eq!(p.cache_write, 3.75);
         assert_eq!(p.cache_read, 0.30);
 
+        let p = get_claude_pricing("claude-4.5-sonnet");
+        assert_eq!(p.input, 3.00);
+        assert_eq!(p.output, 15.00);
+        assert_eq!(p.cache_write, 3.75);
+        assert_eq!(p.cache_read, 0.30);
+
+        let p = get_claude_pricing("claude-3-5-sonnet-20241022");
+        assert_eq!(p.input, 3.00);
+        assert_eq!(p.output, 15.00);
+        assert_eq!(p.cache_write, 3.75);
+        assert_eq!(p.cache_read, 0.30);
+
         let p = get_claude_pricing("claude-opus-4-7");
         assert_eq!(p.input, 5.00);
         assert_eq!(p.output, 25.00);
 
         let p = get_claude_pricing("claude-opus-4-8");
+        assert_eq!(p.input, 5.00);
+        assert_eq!(p.output, 25.00);
+        assert_eq!(p.cache_write, 6.25);
+        assert_eq!(p.cache_read, 0.50);
+
+        let p = get_claude_pricing("claude-4.6-opus");
         assert_eq!(p.input, 5.00);
         assert_eq!(p.output, 25.00);
         assert_eq!(p.cache_write, 6.25);
@@ -518,74 +540,91 @@ mod tests {
         let p = get_gemini_pricing("gemini-3.1-flash-lite-preview", 0);
         assert_eq!(p.input, 0.25);
         assert_eq!(p.output, 1.50);
-        assert_eq!(p.cache_write, 0.025);
+        assert_eq!(p.cache_read, 0.025);
+        assert_eq!(p.cache_write, 0.0);
 
         // 3.6 Flash
         let p = get_gemini_pricing("gemini-3.6-flash", 0);
         assert_eq!(p.input, 1.50);
         assert_eq!(p.output, 7.50);
-        assert_eq!(p.cache_write, 0.15);
+        assert_eq!(p.cache_read, 0.15);
+        assert_eq!(p.cache_write, 0.0);
 
         // 3.5 Flash
         let p = get_gemini_pricing("gemini-3.5-flash", 0);
         assert_eq!(p.input, 1.50);
         assert_eq!(p.output, 9.00);
-        assert_eq!(p.cache_write, 0.15);
+        assert_eq!(p.cache_read, 0.15);
+        assert_eq!(p.cache_write, 0.0);
 
         // 3.1 Pro (low context)
         let p = get_gemini_pricing("gemini-3.1-pro", 100_000);
         assert_eq!(p.input, 2.00);
         assert_eq!(p.output, 12.00);
+        assert_eq!(p.cache_read, 0.20);
+        assert_eq!(p.cache_write, 0.0);
 
         // 3.1 Pro (high context)
         let p = get_gemini_pricing("gemini-3.1-pro", 300_000);
         assert_eq!(p.input, 4.00);
         assert_eq!(p.output, 18.00);
+        assert_eq!(p.cache_read, 0.40);
+        assert_eq!(p.cache_write, 0.0);
 
         // 2.5 Pro (low context)
         let p = get_gemini_pricing("gemini-2.5-pro", 150_000);
         assert_eq!(p.input, 1.25);
         assert_eq!(p.output, 10.00);
-        assert_eq!(p.cache_write, 0.125);
+        assert_eq!(p.cache_read, 0.125);
+        assert_eq!(p.cache_write, 0.0);
 
         // 2.5 Pro (high context)
         let p = get_gemini_pricing("gemini-2.5-pro", 250_000);
         assert_eq!(p.input, 2.50);
         assert_eq!(p.output, 15.00);
-        assert_eq!(p.cache_write, 0.25);
+        assert_eq!(p.cache_read, 0.25);
+        assert_eq!(p.cache_write, 0.0);
 
         // 2.5 Flash
         let p = get_gemini_pricing("gemini-2.5-flash", 0);
         assert_eq!(p.input, 0.30);
         assert_eq!(p.output, 2.50);
-        assert_eq!(p.cache_write, 0.03);
+        assert_eq!(p.cache_read, 0.03);
+        assert_eq!(p.cache_write, 0.0);
 
         // 2.0 Flash
         let p = get_gemini_pricing("gemini-2.0-flash", 0);
         assert_eq!(p.input, 0.10);
         assert_eq!(p.output, 0.40);
-        assert_eq!(p.cache_write, 0.025);
+        assert_eq!(p.cache_read, 0.025);
+        assert_eq!(p.cache_write, 0.0);
 
         // 1.5 Pro (low context)
         let p = get_gemini_pricing("gemini-1.5-pro", 50_000);
         assert_eq!(p.input, 1.25);
         assert_eq!(p.output, 5.00);
+        assert_eq!(p.cache_read, 0.3125);
+        assert_eq!(p.cache_write, 0.0);
 
         // 1.5 Pro (high context)
         let p = get_gemini_pricing("gemini-1.5-pro", 200_000);
         assert_eq!(p.input, 2.50);
         assert_eq!(p.output, 10.00);
+        assert_eq!(p.cache_read, 0.625);
+        assert_eq!(p.cache_write, 0.0);
 
         // 1.5 Flash (low context)
         let p = get_gemini_pricing("gemini-1.5-flash", 50_000);
         assert_eq!(p.input, 0.075);
         assert_eq!(p.output, 0.30);
-        assert_eq!(p.cache_write, 0.01875);
+        assert_eq!(p.cache_read, 0.01875);
+        assert_eq!(p.cache_write, 0.0);
 
         // 1.5 Flash (high context)
         let p = get_gemini_pricing("gemini-1.5-flash", 150_000);
         assert_eq!(p.input, 0.15);
         assert_eq!(p.output, 0.60);
-        assert_eq!(p.cache_write, 0.0375);
+        assert_eq!(p.cache_read, 0.0375);
+        assert_eq!(p.cache_write, 0.0);
     }
 }

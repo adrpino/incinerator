@@ -283,7 +283,7 @@ pub fn parse_gemini_file(file_path: &std::path::Path) -> GeminiStats {
         // Calculate turn cost using disjoint token categories.
         let turn_cost = (uncached_in as f64 / 1_000_000.0 * pricing.input)
             + (out_tokens as f64 / 1_000_000.0 * pricing.output)
-            + (cache_tokens as f64 / 1_000_000.0 * pricing.cache_write);
+            + (cache_tokens as f64 / 1_000_000.0 * pricing.cache_read);
 
         // For display consistency with the new cost model, store disjoint categories in TokenStats.
         let entry = TokenStats {
@@ -773,37 +773,37 @@ mod tests {
         let pricing = get_gemini_pricing("gemini-3.1-flash-lite-preview", 0);
         assert_eq!(pricing.input, 0.25);
         assert_eq!(pricing.output, 1.50);
-        assert_eq!(pricing.cache_write, 0.025);
+        assert_eq!(pricing.cache_read, 0.025);
 
         let pricing = get_gemini_pricing("gemini-3.1-pro", 100_000);
         assert_eq!(pricing.input, 2.00);
         assert_eq!(pricing.output, 12.00);
-        assert_eq!(pricing.cache_write, 0.20);
+        assert_eq!(pricing.cache_read, 0.20);
 
         let pricing = get_gemini_pricing("gemini-3.1-pro", 300_000);
         assert_eq!(pricing.input, 4.00);
         assert_eq!(pricing.output, 18.00);
-        assert_eq!(pricing.cache_write, 0.40);
+        assert_eq!(pricing.cache_read, 0.40);
 
         let pricing = get_gemini_pricing("gemini-3-flash", 0);
         assert_eq!(pricing.input, 0.50);
         assert_eq!(pricing.output, 3.00);
-        assert_eq!(pricing.cache_write, 0.05);
+        assert_eq!(pricing.cache_read, 0.05);
 
         let pricing = get_gemini_pricing("gemini-3.6-flash", 0);
         assert_eq!(pricing.input, 1.50);
         assert_eq!(pricing.output, 7.50);
-        assert_eq!(pricing.cache_write, 0.15);
+        assert_eq!(pricing.cache_read, 0.15);
 
         let pricing = get_gemini_pricing("gemini-3.5-flash", 0);
         assert_eq!(pricing.input, 1.50);
         assert_eq!(pricing.output, 9.00);
-        assert_eq!(pricing.cache_write, 0.15);
+        assert_eq!(pricing.cache_read, 0.15);
 
         let pricing = get_gemini_pricing("unknown-model", 0);
         assert_eq!(pricing.input, 1.00);
         assert_eq!(pricing.output, 4.00);
-        assert_eq!(pricing.cache_write, 0.10);
+        assert_eq!(pricing.cache_read, 0.10);
     }
 
     #[test]
