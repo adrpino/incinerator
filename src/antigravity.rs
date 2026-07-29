@@ -177,38 +177,36 @@ fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
 
 pub fn parse_antigravity_db() -> Option<AntigravityStats> {
     let base_path = get_antigravity_storage_path()?;
-    let summaries_db = base_path.join("conversation_summaries.db");
-    if !summaries_db.exists() {
+    parse_antigravity_db_from_path(base_path)
+}
+
+pub fn parse_antigravity_db_from_path(base_path: PathBuf) -> Option<AntigravityStats> {
+    let conversations_dir = base_path.join("conversations");
+    if !conversations_dir.exists() {
         return None;
     }
 
-    let conn = Connection::open(&summaries_db).ok()?;
-    let mut stmt = conn
-        .prepare("SELECT conversation_id, last_modified_time FROM conversation_summaries")
-        .ok()?;
-
+    let entries = std::fs::read_dir(&conversations_dir).ok()?;
     let mut stats = AntigravityStats::default();
 
-    let rows = stmt
-        .query_map([], |row| {
-            let id: String = row.get(0)?;
-            let mod_time: String = row.get(1)?;
-            Ok((id, mod_time))
-        })
-        .ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
 
-    for row in rows.flatten() {
-        let (conv_id, time_str) = row;
-        let session_db_path = base_path.join(format!("conversations/{}.db", conv_id));
-        if !session_db_path.exists() {
+        // Process only .db files
+        if path.extension().and_then(|s| s.to_str()) != Some("db") {
             continue;
         }
 
-        stats.sessions_found += 1;
-
-        let date_key = DateTime::parse_from_rfc3339(&time_str)
-            .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d").to_string())
-            .unwrap_or_else(|_| Local::now().format("%Y-%m-%d").to_string());
+        // Get date from file modification metadata
+        let date_key = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(|sys_time| {
+                let dt: DateTime<Local> = sys_time.into();
+                dt.format("%Y-%m-%d").to_string()
+            })
+            .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
 
         let month_key = if date_key.len() >= 7 {
             date_key[..7].to_string()
@@ -216,7 +214,9 @@ pub fn parse_antigravity_db() -> Option<AntigravityStats> {
             "unknown".to_string()
         };
 
-        if let Ok(session_conn) = Connection::open(&session_db_path) {
+        stats.sessions_found += 1;
+
+        if let Ok(session_conn) = Connection::open(&path) {
             if let Ok(mut gen_stmt) = session_conn.prepare("SELECT data FROM gen_metadata") {
                 if let Ok(blobs) = gen_stmt.query_map([], |r| r.get::<_, Vec<u8>>(0)) {
                     for blob_res in blobs.flatten() {
@@ -470,5 +470,52 @@ mod tests {
         assert_eq!(res.output_tokens, 2080);
         assert_eq!(res.cached_tokens, 708);
         assert_eq!(res.reasoning_tokens, 473);
+    }
+
+    #[test]
+    fn test_parse_antigravity_db_from_path() {
+        use tempfile::tempdir;
+
+        // Create a temporary directory structure
+        let tmp_dir = tempdir().unwrap();
+        let base_path = tmp_dir.path();
+        let conversations_dir = base_path.join("conversations");
+        std::fs::create_dir(&conversations_dir).unwrap();
+
+        // Create a mock SQLite database file in the conversations directory
+        let db_path = conversations_dir.join("session_1.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute("CREATE TABLE gen_metadata (data BLOB)", [])
+            .unwrap();
+
+        // Construct standard CortexGeneratorMetadata blob
+        let mut blob = vec![
+            0x0a, 0x24, // Field 1 tag & len
+            0x18, 0xaf, 0x08, // Field 3 varint 1071
+            0x22, 0x0c, // Field 4 submessage tag & len
+            0x08, 0xaf, 0x08, // input 1071
+            0x10, 0xa0, 0x10, // output 2080
+            0x18, 0xc4, 0x05, // cached 708
+            0x48, 0xd9, 0x03, // reasoning 473
+            0x9a, 0x01, 0x10, // Field 19 tag & len
+        ];
+        blob.extend_from_slice(b"gemini-3.6-flash");
+
+        conn.execute("INSERT INTO gen_metadata (data) VALUES (?)", [blob])
+            .unwrap();
+
+        // Close the connection so file handle is released
+        drop(conn);
+
+        // Run the parser on the temporary base path
+        let stats = parse_antigravity_db_from_path(base_path.to_path_buf()).unwrap();
+
+        // Verify the extracted statistics
+        assert_eq!(stats.sessions_found, 1);
+        assert!(stats.model_stats.contains_key("gemini-3.6-flash"));
+        let token_stats = stats.model_stats.get("gemini-3.6-flash").unwrap();
+        assert_eq!(token_stats.in_tokens, 1071);
+        assert_eq!(token_stats.out_tokens, 2080);
+        assert_eq!(token_stats.cache_read_tokens, 708);
     }
 }
