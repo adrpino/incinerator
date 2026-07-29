@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::antigravity::{AntigravityStats, get_antigravity_storage_path, parse_antigravity_db};
 use crate::claude::ClaudeStats;
 use crate::cline::ClineStats;
 use crate::colors::{
@@ -117,6 +118,7 @@ enum DailyFilter {
     Zed,
     Copilot,
     Opencode,
+    Antigravity,
 }
 
 impl DailyFilter {
@@ -129,6 +131,7 @@ impl DailyFilter {
             DailyFilter::Zed => "Zed",
             DailyFilter::Copilot => "Copilot",
             DailyFilter::Opencode => "Opencode",
+            DailyFilter::Antigravity => "Antigravity",
         }
     }
 }
@@ -182,6 +185,7 @@ enum FileStats {
     Zed(ZedStats),
     Copilot(CopilotStats),
     Opencode(OpencodeStats),
+    Antigravity(AntigravityStats),
 }
 
 struct App {
@@ -318,7 +322,7 @@ impl App {
                             self.settings.theme = self.settings.theme.next();
                             terminal.draw(|f| self.draw(f))?;
                         }
-                        KeyCode::Char(c @ ('1' | '2' | '3' | '4' | '5' | '6' | '7'))
+                        KeyCode::Char(c @ ('1' | '2' | '3' | '4' | '5' | '6' | '7' | '8'))
                             if matches!(
                                 self.tab,
                                 Tab::MonthlyCosts
@@ -336,6 +340,7 @@ impl App {
                                 '5' => DailyFilter::Zed,
                                 '6' => DailyFilter::Copilot,
                                 '7' => DailyFilter::Opencode,
+                                '8' => DailyFilter::Antigravity,
                                 _ => self.daily_filter,
                             };
                             self.selected_model_idx = 0; // Reset index on filter change
@@ -356,6 +361,9 @@ impl App {
                                 DailyFilter::Zed => self.stats.model_stats_zed.len(),
                                 DailyFilter::Copilot => self.stats.model_stats_copilot.len(),
                                 DailyFilter::Opencode => self.stats.model_stats_opencode.len(),
+                                DailyFilter::Antigravity => {
+                                    self.stats.model_stats_antigravity.len()
+                                }
                             };
                             if max_len > 0 && self.selected_model_idx < max_len - 1 {
                                 self.selected_model_idx += 1;
@@ -643,6 +651,7 @@ impl App {
             (DailyFilter::Zed, "5"),
             (DailyFilter::Copilot, "6"),
             (DailyFilter::Opencode, "7"),
+            (DailyFilter::Antigravity, "8"),
         ];
         let mut chip_spans: Vec<Span> = vec![Span::styled(" Filter: ", Style::default().dim())];
         let palette = self.settings.theme.palette();
@@ -682,6 +691,7 @@ impl App {
             DailyFilter::Zed => &self.stats.monthly_costs_zed,
             DailyFilter::Copilot => &self.stats.monthly_costs_copilot,
             DailyFilter::Opencode => &self.stats.monthly_costs_opencode,
+            DailyFilter::Antigravity => &self.stats.monthly_costs_antigravity,
         };
 
         let title = format!(" Monthly Burn (USD) — {} ", self.daily_filter.label());
@@ -705,6 +715,7 @@ impl App {
             DailyFilter::Zed => &self.stats.daily_costs_zed,
             DailyFilter::Copilot => &self.stats.daily_costs_copilot,
             DailyFilter::Opencode => &self.stats.daily_costs_opencode,
+            DailyFilter::Antigravity => &self.stats.daily_costs_antigravity,
         };
 
         let title = format!(" Daily Burn (USD) — {} ", self.daily_filter.label());
@@ -821,6 +832,7 @@ impl App {
             DailyFilter::Zed => &self.stats.daily_tokens_zed,
             DailyFilter::Copilot => &self.stats.daily_tokens_copilot,
             DailyFilter::Opencode => &self.stats.daily_tokens_opencode,
+            DailyFilter::Antigravity => &self.stats.daily_tokens_antigravity,
         };
 
         let mut sorted_days: Vec<_> = source.iter().collect();
@@ -926,6 +938,7 @@ impl App {
             DailyFilter::Zed => &self.stats.languages_zed,
             DailyFilter::Copilot => &self.stats.languages_copilot,
             DailyFilter::Opencode => &self.stats.languages_opencode,
+            DailyFilter::Antigravity => &self.stats.languages_antigravity,
         };
 
         let mut sorted_langs: Vec<_> = analyzer.stats.iter().collect();
@@ -990,6 +1003,7 @@ impl App {
             DailyFilter::Zed => &self.stats.model_stats_zed,
             DailyFilter::Copilot => &self.stats.model_stats_copilot,
             DailyFilter::Opencode => &self.stats.model_stats_opencode,
+            DailyFilter::Antigravity => &self.stats.model_stats_antigravity,
         };
 
         let mut model_list: Vec<(String, crate::viz::TokenStats, f64)> = models_map
@@ -1152,6 +1166,7 @@ impl App {
                     DailyFilter::Gemini => "Gemini CLI",
                     DailyFilter::Copilot => "Copilot",
                     DailyFilter::Opencode => "Opencode",
+                    DailyFilter::Antigravity => "Antigravity",
                     DailyFilter::All => "AI Assistant",
                 }
             };
@@ -1398,8 +1413,19 @@ fn run_scan_pass(
     let opencode_db_path = get_opencode_db_path();
     let n_opencode = if opencode_db_path.is_some() { 1 } else { 0 };
 
+    let antigravity_db_path =
+        get_antigravity_storage_path().map(|p| p.join("conversation_summaries.db"));
+    let n_antigravity = if antigravity_db_path.is_some() { 1 } else { 0 };
+
     progress.total.store(
-        (n_cline + n_claude + n_gemini + n_gemini_lang + n_zed + n_copilot + n_opencode) as u32,
+        (n_cline
+            + n_claude
+            + n_gemini
+            + n_gemini_lang
+            + n_zed
+            + n_copilot
+            + n_opencode
+            + n_antigravity) as u32,
         Ordering::Relaxed,
     );
 
@@ -1418,6 +1444,9 @@ fn run_scan_pass(
     if let Some(ref p) = opencode_db_path {
         all_paths.insert(p.clone());
     }
+    if let Some(ref p) = antigravity_db_path {
+        all_paths.insert(p.clone());
+    }
 
     cache.retain(|p, _| all_paths.contains(p));
 
@@ -1429,6 +1458,7 @@ fn run_scan_pass(
         Zed,
         Copilot,
         Opencode,
+        Antigravity,
     }
     let mut tasks = Vec::new();
     for p in cline_files {
@@ -1451,6 +1481,9 @@ fn run_scan_pass(
     }
     if let Some(p) = opencode_db_path {
         tasks.push((p, PType::Opencode));
+    }
+    if let Some(p) = antigravity_db_path {
+        tasks.push((p, PType::Antigravity));
     }
 
     let t_parse_start = Instant::now();
@@ -1492,6 +1525,13 @@ fn run_scan_pass(
                         FileStats::Opencode(OpencodeStats::default())
                     }
                 }
+                PType::Antigravity => {
+                    if let Some(stats) = parse_antigravity_db() {
+                        FileStats::Antigravity(stats)
+                    } else {
+                        FileStats::Antigravity(AntigravityStats::default())
+                    }
+                }
             };
             let parse_us = parse_start.elapsed().as_micros() as u64;
             progress_ref.done.fetch_add(1, Ordering::Relaxed);
@@ -1518,6 +1558,9 @@ fn run_scan_pass(
     let mut opencode_n = 0u32;
     let mut opencode_us_sum: u64 = 0;
     let mut opencode_us_max: u64 = 0;
+    let mut antigravity_n = 0u32;
+    let mut antigravity_us_sum: u64 = 0;
+    let mut antigravity_us_max: u64 = 0;
     for (path, mtime, stats, was_parsed, parse_us) in results {
         if was_parsed {
             files_parsed += 1;
@@ -1564,6 +1607,13 @@ fn run_scan_pass(
                         opencode_us_max = parse_us;
                     }
                 }
+                FileStats::Antigravity(_) => {
+                    antigravity_n += 1;
+                    antigravity_us_sum += parse_us;
+                    if parse_us > antigravity_us_max {
+                        antigravity_us_max = parse_us;
+                    }
+                }
             }
         }
         cache.insert(path, (mtime, stats));
@@ -1584,6 +1634,7 @@ fn run_scan_pass(
                 FileStats::Zed(s) => new_stats.add_zed(s.clone(), 0.0),
                 FileStats::Copilot(s) => new_stats.add_copilot(s.clone(), 0.0),
                 FileStats::Opencode(s) => new_stats.add_opencode(s.clone(), 0.0),
+                FileStats::Antigravity(s) => new_stats.add_antigravity(s.clone(), 0.0),
             }
         }
     }
@@ -1606,7 +1657,7 @@ fn run_scan_pass(
             let cache_hits = cache_size.saturating_sub(files_parsed as usize);
             let _ = writeln!(
                 f,
-                "[{}] mode={} walk_cline={}ms walk_claude={}ms walk_gemini={}ms walk_copilot={}ms parse={}ms [cline n={} sum={}ms max={}ms | claude n={} sum={}ms max={}ms | gemini n={} sum={}ms max={}ms | zed n={} sum={}ms max={}ms | copilot n={} sum={}ms max={}ms | opencode n={} sum={}ms max={}ms] agg={}ms total={}ms parsed={} cache_hits={} cache_size={}",
+                "[{}] mode={} walk_cline={}ms walk_claude={}ms walk_gemini={}ms walk_copilot={}ms parse={}ms [cline n={} sum={}ms max={}ms | claude n={} sum={}ms max={}ms | gemini n={} sum={}ms max={}ms | zed n={} sum={}ms max={}ms | copilot n={} sum={}ms max={}ms | opencode n={} sum={}ms max={}ms | antigravity n={} sum={}ms max={}ms] agg={}ms total={}ms parsed={} cache_hits={} cache_size={}",
                 now,
                 if cfg!(debug_assertions) {
                     "debug"
@@ -1636,6 +1687,9 @@ fn run_scan_pass(
                 opencode_n,
                 opencode_us_sum / 1000,
                 opencode_us_max / 1000,
+                antigravity_n,
+                antigravity_us_sum / 1000,
+                antigravity_us_max / 1000,
                 t_agg.as_millis(),
                 start.elapsed().as_millis(),
                 files_parsed,
@@ -1832,6 +1886,7 @@ mod tests {
         assert_eq!(DailyFilter::Zed.label(), "Zed");
         assert_eq!(DailyFilter::Copilot.label(), "Copilot");
         assert_eq!(DailyFilter::Opencode.label(), "Opencode");
+        assert_eq!(DailyFilter::Antigravity.label(), "Antigravity");
     }
 
     #[test]

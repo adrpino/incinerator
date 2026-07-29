@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
+use crate::antigravity::{AntigravityStats, get_antigravity_storage_path, run_antigravity_report};
 use crate::claude::{ClaudeStats, get_claude_storage_path, run_claude_report};
 use crate::cline::{ClineStats, get_cline_storage_path, run_cline_report};
 use crate::colors::*;
@@ -19,6 +20,7 @@ pub enum Provider {
     Zed,
     Copilot,
     Opencode,
+    Antigravity,
 }
 
 impl std::fmt::Display for Provider {
@@ -30,6 +32,7 @@ impl std::fmt::Display for Provider {
             Provider::Zed => write!(f, "Zed"),
             Provider::Copilot => write!(f, "Copilot"),
             Provider::Opencode => write!(f, "Opencode"),
+            Provider::Antigravity => write!(f, "Antigravity"),
         }
     }
 }
@@ -43,6 +46,7 @@ impl Provider {
             Provider::Zed,
             Provider::Copilot,
             Provider::Opencode,
+            Provider::Antigravity,
         ]
     }
 
@@ -54,6 +58,7 @@ impl Provider {
             Provider::Zed => get_zed_db_path(),
             Provider::Copilot => get_copilot_storage_path(),
             Provider::Opencode => get_opencode_db_path(),
+            Provider::Antigravity => get_antigravity_storage_path(),
         }
     }
 }
@@ -67,6 +72,7 @@ pub struct UnifiedStats {
     pub daily_costs_zed: BTreeMap<String, f64>,
     pub daily_costs_copilot: BTreeMap<String, f64>,
     pub daily_costs_opencode: BTreeMap<String, f64>,
+    pub daily_costs_antigravity: BTreeMap<String, f64>,
     pub daily_tokens: BTreeMap<String, TokenStats>,
     pub daily_tokens_cline: BTreeMap<String, TokenStats>,
     pub daily_tokens_claude: BTreeMap<String, TokenStats>,
@@ -74,6 +80,7 @@ pub struct UnifiedStats {
     pub daily_tokens_zed: BTreeMap<String, TokenStats>,
     pub daily_tokens_copilot: BTreeMap<String, TokenStats>,
     pub daily_tokens_opencode: BTreeMap<String, TokenStats>,
+    pub daily_tokens_antigravity: BTreeMap<String, TokenStats>,
     pub monthly_costs: BTreeMap<String, f64>,
     pub monthly_costs_cline: BTreeMap<String, f64>,
     pub monthly_costs_claude: BTreeMap<String, f64>,
@@ -81,6 +88,7 @@ pub struct UnifiedStats {
     pub monthly_costs_zed: BTreeMap<String, f64>,
     pub monthly_costs_copilot: BTreeMap<String, f64>,
     pub monthly_costs_opencode: BTreeMap<String, f64>,
+    pub monthly_costs_antigravity: BTreeMap<String, f64>,
     pub monthly_tokens: BTreeMap<String, TokenStats>,
     pub model_stats: HashMap<String, TokenStats>,
     pub model_stats_cline: HashMap<String, TokenStats>,
@@ -89,6 +97,7 @@ pub struct UnifiedStats {
     pub model_stats_zed: HashMap<String, TokenStats>,
     pub model_stats_copilot: HashMap<String, TokenStats>,
     pub model_stats_opencode: HashMap<String, TokenStats>,
+    pub model_stats_antigravity: HashMap<String, TokenStats>,
     pub provider_costs: HashMap<Provider, f64>,
     pub total_tokens: TokenStats,
     pub total_cost: f64,
@@ -103,6 +112,7 @@ pub struct UnifiedStats {
     pub languages_zed: crate::languages::LanguageAnalyzer,
     pub languages_copilot: crate::languages::LanguageAnalyzer,
     pub languages_opencode: crate::languages::LanguageAnalyzer,
+    pub languages_antigravity: crate::languages::LanguageAnalyzer,
 }
 
 impl UnifiedStats {
@@ -113,6 +123,7 @@ impl UnifiedStats {
         let zed_res = run_zed_report();
         let copilot_res = run_copilot_report();
         let opencode_res = run_opencode_report();
+        let antigravity_res = run_antigravity_report();
 
         if cline_res.is_none()
             && gemini_res.is_none()
@@ -120,6 +131,7 @@ impl UnifiedStats {
             && zed_res.is_none()
             && copilot_res.is_none()
             && opencode_res.is_none()
+            && antigravity_res.is_none()
         {
             return None;
         }
@@ -142,6 +154,9 @@ impl UnifiedStats {
         }
         if let Some((s, t)) = opencode_res {
             unified.add_opencode(s, t);
+        }
+        if let Some((s, t)) = antigravity_res {
+            unified.add_antigravity(s, t);
         }
         Some(unified)
     }
@@ -403,6 +418,49 @@ impl UnifiedStats {
         self.files_parsed += s.sessions_found as u32;
         self.languages.merge(&s.languages);
         self.languages_opencode.merge(&s.languages);
+    }
+
+    pub fn add_antigravity(&mut self, s: AntigravityStats, parse_time: f64) {
+        self.merge_costs(&s.daily_costs, &s.monthly_costs);
+        for (k, v) in &s.daily_costs {
+            *self.daily_costs_antigravity.entry(k.clone()).or_insert(0.0) += v;
+        }
+        for (k, v) in &s.monthly_costs {
+            *self
+                .monthly_costs_antigravity
+                .entry(k.clone())
+                .or_insert(0.0) += v;
+        }
+        self.merge_daily_tokens(&s.daily_stats);
+        for (k, v) in &s.daily_stats {
+            self.daily_tokens_antigravity
+                .entry(k.clone())
+                .or_default()
+                .add(v);
+        }
+        *self
+            .provider_costs
+            .entry(Provider::Antigravity)
+            .or_insert(0.0) += s.total_cost;
+        self.merge_monthly_tokens(&s.monthly_stats);
+        for (model, v) in &s.model_stats {
+            self.model_stats_antigravity
+                .entry(model.clone())
+                .or_default()
+                .add(v);
+        }
+        self.merge_model_stats(s.model_stats.clone());
+
+        let mut total = TokenStats::default();
+        for v in s.model_stats.values() {
+            total.add(v);
+        }
+        self.total_tokens.add(&total);
+        self.total_cost += s.total_cost;
+        self.parse_time += parse_time;
+        self.files_parsed += s.sessions_found as u32;
+        self.languages.merge(&s.languages);
+        self.languages_antigravity.merge(&s.languages);
     }
 
     pub fn pad_missing_dates(&mut self) {
@@ -1030,7 +1088,8 @@ mod tests {
         assert!(all_providers.contains(&Provider::Zed));
         assert!(all_providers.contains(&Provider::Copilot));
         assert!(all_providers.contains(&Provider::Opencode));
+        assert!(all_providers.contains(&Provider::Antigravity));
 
-        assert_eq!(all_providers.len(), 6);
+        assert_eq!(all_providers.len(), 7);
     }
 }

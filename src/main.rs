@@ -1,5 +1,6 @@
 #![allow(clippy::collapsible_if)]
 
+mod antigravity;
 mod claude;
 mod cline;
 mod colors;
@@ -80,6 +81,12 @@ enum Commands {
         #[arg(long)]
         daily: Option<usize>,
     },
+    /// Analyze Antigravity CLI usage logs (~/.gemini/antigravity-cli)
+    Antigravity {
+        /// Number of days to show in the daily costs chart
+        #[arg(long)]
+        daily: Option<usize>,
+    },
     /// Launch interactive TUI (default when no command given)
     Tui,
 }
@@ -132,6 +139,12 @@ fn main() {
             let days = daily.unwrap_or(default_daily);
             if let Some((stats, time)) = opencode::run_opencode_report() {
                 opencode::print_opencode_report(&stats, time, days);
+            }
+        }
+        Some(Commands::Antigravity { daily }) => {
+            let days = daily.unwrap_or(default_daily);
+            if let Some((stats, time)) = antigravity::run_antigravity_report() {
+                antigravity::print_antigravity_report(&stats, time, days);
             }
         }
         Some(Commands::Tui) => {
