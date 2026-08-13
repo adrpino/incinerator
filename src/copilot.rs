@@ -1,4 +1,3 @@
-use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -19,71 +18,13 @@ pub struct CopilotStats {
     pub languages: crate::languages::LanguageAnalyzer,
 }
 
-#[derive(Deserialize, Debug)]
-struct CopilotModelMetadata {
-    #[allow(dead_code)]
-    name: Option<String>,
-    #[serde(rename = "inputCost")]
-    input_cost: Option<f64>,
-    #[serde(rename = "outputCost")]
-    output_cost: Option<f64>,
-    #[serde(rename = "cacheCost")]
-    #[allow(dead_code)]
-    cache_cost: Option<f64>,
-}
-
-#[derive(Deserialize, Debug)]
-struct CopilotSelectedModel {
-    identifier: Option<String>,
-    metadata: Option<CopilotModelMetadata>,
-}
-
-#[derive(Deserialize, Debug)]
-struct CopilotInputState {
-    #[serde(rename = "selectedModel")]
-    selected_model: Option<CopilotSelectedModel>,
-}
-
-#[derive(Deserialize, Debug)]
-struct CopilotResultMetadata {
-    #[serde(rename = "promptTokens")]
-    prompt_tokens: Option<i64>,
-    #[serde(rename = "outputTokens")]
-    output_tokens: Option<i64>,
-    #[allow(dead_code)]
-    details: Option<String>,
-}
-
-#[derive(Deserialize, Debug)]
-struct CopilotResult {
-    metadata: Option<CopilotResultMetadata>,
-}
-
-#[derive(Deserialize, Debug)]
-struct CopilotRequest {
-    #[serde(rename = "requestId")]
-    #[allow(dead_code)]
-    request_id: String,
-    #[serde(rename = "modelId")]
+#[derive(Default, Clone, Debug)]
+struct RequestState {
     model_id: Option<String>,
-    result: Option<CopilotResult>,
-    #[serde(rename = "inputState")]
-    input_state: Option<CopilotInputState>,
-}
-
-#[derive(Deserialize, Debug)]
-struct CopilotSessionData {
-    #[serde(rename = "sessionId")]
-    #[allow(dead_code)]
-    session_id: Option<String>,
-    #[serde(default)]
-    requests: Vec<CopilotRequest>,
-}
-
-#[derive(Deserialize, Debug)]
-struct CopilotLine {
-    kind: Option<i32>,
-    v: CopilotSessionData,
+    input_cost: Option<f64>,
+    output_cost: Option<f64>,
+    prompt_tokens: i64,
+    output_tokens: i64,
 }
 
 pub fn get_copilot_storage_path() -> Option<PathBuf> {
@@ -109,25 +50,26 @@ pub fn get_copilot_storage_path() -> Option<PathBuf> {
 }
 
 pub fn get_copilot_files() -> Vec<PathBuf> {
+    let mut files = Vec::new();
     let base_dir = match get_copilot_storage_path() {
         Some(d) => d,
-        None => return Vec::new(),
+        None => return files,
     };
 
-    if !base_dir.is_dir() {
-        return Vec::new();
-    }
-
-    let mut files = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&base_dir) {
-        for entry in entries.flatten() {
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                let chat_sessions_dir = entry.path().join("chatSessions");
-                if chat_sessions_dir.is_dir() {
-                    if let Ok(session_files) = std::fs::read_dir(chat_sessions_dir) {
-                        for s_file in session_files.flatten() {
-                            if s_file.path().extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                                files.push(s_file.path());
+    // 1. Scan workspaceStorage/*/chatSessions/*.jsonl
+    if base_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&base_dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    let chat_sessions_dir = entry.path().join("chatSessions");
+                    if chat_sessions_dir.is_dir() {
+                        if let Ok(session_files) = std::fs::read_dir(chat_sessions_dir) {
+                            for s_file in session_files.flatten() {
+                                if s_file.path().extension().and_then(|e| e.to_str())
+                                    == Some("jsonl")
+                                {
+                                    files.push(s_file.path());
+                                }
                             }
                         }
                     }
@@ -135,6 +77,23 @@ pub fn get_copilot_files() -> Vec<PathBuf> {
             }
         }
     }
+
+    // 2. Scan globalStorage/emptyWindowChatSessions/*.jsonl
+    if let Some(user_dir) = base_dir.parent() {
+        let empty_window_dir = user_dir
+            .join("globalStorage")
+            .join("emptyWindowChatSessions");
+        if empty_window_dir.is_dir() {
+            if let Ok(session_files) = std::fs::read_dir(empty_window_dir) {
+                for s_file in session_files.flatten() {
+                    if s_file.path().extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                        files.push(s_file.path());
+                    }
+                }
+            }
+        }
+    }
+
     files
 }
 
@@ -146,25 +105,190 @@ pub fn parse_copilot_file(file_path: &Path) -> CopilotStats {
         Err(_) => return local,
     };
 
-    let mut parsed_line: Option<CopilotLine> = None;
+    let mut requests: BTreeMap<usize, RequestState> = BTreeMap::new();
+    let mut default_model: Option<String> = None;
+    let mut default_input_cost: Option<f64> = None;
+    let mut default_output_cost: Option<f64> = None;
+    let mut valid_file_parsed = false;
+
     for line in content.lines() {
-        if line.trim().is_empty() {
+        let line = line.trim();
+        if line.is_empty() {
             continue;
         }
-        if let Ok(p) = serde_json::from_str::<CopilotLine>(line) {
-            if p.kind == Some(0) {
-                parsed_line = Some(p);
-                break;
-            } else if parsed_line.is_none() {
-                // Fallback for older .json files that don't have a 'kind' event structure
-                parsed_line = Some(p);
+
+        let val: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        valid_file_parsed = true;
+
+        let kind = val.get("kind").and_then(|k| k.as_i64());
+        let k_arr = val.get("k").and_then(|k| k.as_array());
+        let v_val = val.get("v");
+
+        if kind == Some(0) || kind.is_none() {
+            // Process initial state snapshot
+            let target_obj = if kind.is_none() {
+                &val
+            } else {
+                v_val.unwrap_or(&val)
+            };
+            let session_data = target_obj.get("v").unwrap_or(target_obj);
+
+            if let Some(reqs) = session_data.get("requests").and_then(|r| r.as_array()) {
+                for (idx, r_val) in reqs.iter().enumerate() {
+                    let mut r_state = RequestState::default();
+                    if let Some(m_id) = r_val.get("modelId").and_then(|m| m.as_str()) {
+                        r_state.model_id = Some(m_id.to_string());
+                    }
+                    if let Some(res) = r_val.get("result") {
+                        if let Some(meta) = res.get("metadata") {
+                            r_state.prompt_tokens = meta
+                                .get("promptTokens")
+                                .and_then(|t| t.as_i64())
+                                .unwrap_or(0);
+                            r_state.output_tokens = meta
+                                .get("completionTokens")
+                                .or_else(|| meta.get("outputTokens"))
+                                .and_then(|t| t.as_i64())
+                                .unwrap_or(0);
+                        }
+                    }
+                    if let Some(in_state) = r_val.get("inputState") {
+                        if let Some(sel_model) = in_state.get("selectedModel") {
+                            if r_state.model_id.is_none() {
+                                if let Some(m_id) =
+                                    sel_model.get("identifier").and_then(|i| i.as_str())
+                                {
+                                    r_state.model_id = Some(m_id.to_string());
+                                }
+                            }
+                            if let Some(meta) = sel_model.get("metadata") {
+                                r_state.input_cost = meta.get("inputCost").and_then(|c| c.as_f64());
+                                r_state.output_cost =
+                                    meta.get("outputCost").and_then(|c| c.as_f64());
+                            }
+                        }
+                    }
+                    requests.insert(idx, r_state);
+                }
+            }
+        } else if let Some(k) = k_arr {
+            // Accumulate stream delta updates across key paths k
+            if k.len() >= 3 && k[0] == "requests" {
+                if let Some(idx) = k[1].as_u64().map(|u| u as usize) {
+                    let r_entry = requests.entry(idx).or_default();
+                    if k.len() == 3 {
+                        if let Some(prop) = k[2].as_str() {
+                            match prop {
+                                "promptTokens" => {
+                                    if let Some(v_i64) = v_val.and_then(|v| v.as_i64()) {
+                                        r_entry.prompt_tokens = v_i64;
+                                    }
+                                }
+                                "completionTokens" | "outputTokens" => {
+                                    if let Some(v_i64) = v_val.and_then(|v| v.as_i64()) {
+                                        r_entry.output_tokens = v_i64;
+                                    }
+                                }
+                                "modelId" => {
+                                    if let Some(v_str) = v_val.and_then(|v| v.as_str()) {
+                                        r_entry.model_id = Some(v_str.to_string());
+                                    }
+                                }
+                                "result" => {
+                                    if let Some(v_obj) = v_val {
+                                        if let Some(meta) = v_obj.get("metadata") {
+                                            if let Some(prompt) =
+                                                meta.get("promptTokens").and_then(|p| p.as_i64())
+                                            {
+                                                r_entry.prompt_tokens = prompt;
+                                            }
+                                            if let Some(output) = meta
+                                                .get("outputTokens")
+                                                .or_else(|| meta.get("completionTokens"))
+                                                .and_then(|o| o.as_i64())
+                                            {
+                                                r_entry.output_tokens = output;
+                                            }
+                                        }
+                                    }
+                                }
+                                "inputState" => {
+                                    if let Some(v_obj) = v_val {
+                                        if let Some(sel_model) = v_obj.get("selectedModel") {
+                                            if r_entry.model_id.is_none() {
+                                                if let Some(m_id) = sel_model
+                                                    .get("identifier")
+                                                    .and_then(|i| i.as_str())
+                                                {
+                                                    r_entry.model_id = Some(m_id.to_string());
+                                                }
+                                            }
+                                            if let Some(meta) = sel_model.get("metadata") {
+                                                r_entry.input_cost =
+                                                    meta.get("inputCost").and_then(|c| c.as_f64());
+                                                r_entry.output_cost =
+                                                    meta.get("outputCost").and_then(|c| c.as_f64());
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    } else if k.len() == 4 {
+                        if k[2] == "result" && k[3] == "metadata" {
+                            if let Some(v_obj) = v_val {
+                                if let Some(prompt) =
+                                    v_obj.get("promptTokens").and_then(|p| p.as_i64())
+                                {
+                                    r_entry.prompt_tokens = prompt;
+                                }
+                                if let Some(output) = v_obj
+                                    .get("outputTokens")
+                                    .or_else(|| v_obj.get("completionTokens"))
+                                    .and_then(|o| o.as_i64())
+                                {
+                                    r_entry.output_tokens = output;
+                                }
+                            }
+                        }
+                    } else if k.len() == 5 {
+                        if k[2] == "result" && k[3] == "metadata" {
+                            if let Some(prop) = k[4].as_str() {
+                                if prop == "promptTokens" {
+                                    if let Some(v_i64) = v_val.and_then(|v| v.as_i64()) {
+                                        r_entry.prompt_tokens = v_i64;
+                                    }
+                                } else if prop == "completionTokens" || prop == "outputTokens" {
+                                    if let Some(v_i64) = v_val.and_then(|v| v.as_i64()) {
+                                        r_entry.output_tokens = v_i64;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if k.len() == 2 && k[0] == "inputState" && k[1] == "selectedModel" {
+                if let Some(v_obj) = v_val {
+                    if let Some(ident) = v_obj.get("identifier").and_then(|i| i.as_str()) {
+                        default_model = Some(ident.to_string());
+                    }
+                    if let Some(meta) = v_obj.get("metadata") {
+                        default_input_cost = meta.get("inputCost").and_then(|c| c.as_f64());
+                        default_output_cost = meta.get("outputCost").and_then(|c| c.as_f64());
+                    }
+                }
             }
         }
     }
 
-    let Some(parsed_line) = parsed_line else {
+    if !valid_file_parsed {
         return local;
-    };
+    }
 
     local.threads_found = 1;
 
@@ -175,38 +299,22 @@ pub fn parse_copilot_file(file_path: &Path) -> CopilotStats {
     let date_key = datetime.format("%Y-%m-%d").to_string();
     let month_key = datetime.format("%Y-%m").to_string();
 
-    for request in parsed_line.v.requests {
-        let mut in_tokens = 0;
-        let mut out_tokens = 0;
-
-        if let Some(res) = &request.result {
-            if let Some(meta) = &res.metadata {
-                in_tokens = meta.prompt_tokens.unwrap_or(0);
-                out_tokens = meta.output_tokens.unwrap_or(0);
-            }
-        }
+    for (_idx, state) in requests {
+        let in_tokens = state.prompt_tokens;
+        let out_tokens = state.output_tokens;
 
         if in_tokens == 0 && out_tokens == 0 {
             continue;
         }
 
-        let mut model_name = request.model_id.clone();
-        let (input_cost, output_cost) = if let Some(input_state) = &request.input_state {
-            if let Some(selected_model) = &input_state.selected_model {
-                if model_name.is_none() {
-                    model_name = selected_model.identifier.clone();
-                }
-                if let Some(meta) = &selected_model.metadata {
-                    (meta.input_cost, meta.output_cost)
-                } else {
-                    (None, None)
-                }
-            } else {
-                (None, None)
-            }
+        let model_name = state.model_id.or_else(|| default_model.clone());
+        let (input_cost, output_cost) = if state.input_cost.is_some() || state.output_cost.is_some()
+        {
+            (state.input_cost, state.output_cost)
         } else {
-            (None, None)
+            (default_input_cost, default_output_cost)
         };
+
         let model_name = model_name.unwrap_or_else(|| "copilot/unknown".to_string());
 
         let cost = match (input_cost, output_cost) {
