@@ -1,3 +1,4 @@
+use chrono::{DateTime, Local};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -25,6 +26,7 @@ struct RequestState {
     output_cost: Option<f64>,
     prompt_tokens: i64,
     output_tokens: i64,
+    timestamp: Option<i64>,
 }
 
 pub fn get_copilot_storage_path() -> Option<PathBuf> {
@@ -109,6 +111,7 @@ pub fn parse_copilot_file(file_path: &Path) -> CopilotStats {
     let mut default_model: Option<String> = None;
     let mut default_input_cost: Option<f64> = None;
     let mut default_output_cost: Option<f64> = None;
+    let mut session_creation_date: Option<i64> = None;
     let mut valid_file_parsed = false;
 
     for line in content.lines() {
@@ -137,9 +140,26 @@ pub fn parse_copilot_file(file_path: &Path) -> CopilotStats {
             };
             let session_data = target_obj.get("v").unwrap_or(target_obj);
 
+            if let Some(cdate) = session_data
+                .get("creationDate")
+                .or_else(|| target_obj.get("creationDate"))
+                .and_then(|d| d.as_i64())
+            {
+                session_creation_date = Some(cdate);
+            }
+
             if let Some(reqs) = session_data.get("requests").and_then(|r| r.as_array()) {
                 for (idx, r_val) in reqs.iter().enumerate() {
                     let mut r_state = RequestState::default();
+                    if let Some(ts) = r_val.get("timestamp").and_then(|t| t.as_i64()) {
+                        r_state.timestamp = Some(ts);
+                    } else if let Some(ts) = r_val
+                        .get("modelState")
+                        .and_then(|m| m.get("completedAt"))
+                        .and_then(|t| t.as_i64())
+                    {
+                        r_state.timestamp = Some(ts);
+                    }
                     if let Some(m_id) = r_val.get("modelId").and_then(|m| m.as_str()) {
                         r_state.model_id = Some(m_id.to_string());
                     }
@@ -176,13 +196,78 @@ pub fn parse_copilot_file(file_path: &Path) -> CopilotStats {
                 }
             }
         } else if let Some(k) = k_arr {
-            // Accumulate stream delta updates across key paths k
-            if k.len() >= 3 && k[0] == "requests" {
+            if k.len() == 1 && k[0] == "creationDate" {
+                if let Some(v_i64) = v_val.and_then(|v| v.as_i64()) {
+                    session_creation_date = Some(v_i64);
+                }
+            } else if k.len() == 1 && k[0] == "requests" {
+                if let Some(reqs) = v_val.and_then(|v| v.as_array()) {
+                    for (idx, r_val) in reqs.iter().enumerate() {
+                        let r_entry = requests.entry(idx).or_default();
+                        if let Some(ts) = r_val.get("timestamp").and_then(|t| t.as_i64()) {
+                            r_entry.timestamp = Some(ts);
+                        } else if let Some(ts) = r_val
+                            .get("modelState")
+                            .and_then(|m| m.get("completedAt"))
+                            .and_then(|t| t.as_i64())
+                        {
+                            if r_entry.timestamp.is_none() {
+                                r_entry.timestamp = Some(ts);
+                            }
+                        }
+                        if let Some(m_id) = r_val.get("modelId").and_then(|m| m.as_str()) {
+                            r_entry.model_id = Some(m_id.to_string());
+                        }
+                        if let Some(res) = r_val.get("result") {
+                            if let Some(meta) = res.get("metadata") {
+                                if let Some(prompt) =
+                                    meta.get("promptTokens").and_then(|p| p.as_i64())
+                                {
+                                    r_entry.prompt_tokens = prompt;
+                                }
+                                if let Some(output) = meta
+                                    .get("outputTokens")
+                                    .or_else(|| meta.get("completionTokens"))
+                                    .and_then(|o| o.as_i64())
+                                {
+                                    r_entry.output_tokens = output;
+                                }
+                            }
+                        }
+                        if let Some(in_state) = r_val.get("inputState") {
+                            if let Some(sel_model) = in_state.get("selectedModel") {
+                                if r_entry.model_id.is_none() {
+                                    if let Some(m_id) =
+                                        sel_model.get("identifier").and_then(|i| i.as_str())
+                                    {
+                                        r_entry.model_id = Some(m_id.to_string());
+                                    }
+                                }
+                                if let Some(meta) = sel_model.get("metadata") {
+                                    if r_entry.input_cost.is_none() {
+                                        r_entry.input_cost =
+                                            meta.get("inputCost").and_then(|c| c.as_f64());
+                                    }
+                                    if r_entry.output_cost.is_none() {
+                                        r_entry.output_cost =
+                                            meta.get("outputCost").and_then(|c| c.as_f64());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if k.len() >= 3 && k[0] == "requests" {
                 if let Some(idx) = k[1].as_u64().map(|u| u as usize) {
                     let r_entry = requests.entry(idx).or_default();
                     if k.len() == 3 {
                         if let Some(prop) = k[2].as_str() {
                             match prop {
+                                "timestamp" => {
+                                    if let Some(v_i64) = v_val.and_then(|v| v.as_i64()) {
+                                        r_entry.timestamp = Some(v_i64);
+                                    }
+                                }
                                 "promptTokens" => {
                                     if let Some(v_i64) = v_val.and_then(|v| v.as_i64()) {
                                         r_entry.prompt_tokens = v_i64;
@@ -255,6 +340,12 @@ pub fn parse_copilot_file(file_path: &Path) -> CopilotStats {
                                     r_entry.output_tokens = output;
                                 }
                             }
+                        } else if k[2] == "modelState" && k[3] == "completedAt" {
+                            if let Some(v_i64) = v_val.and_then(|v| v.as_i64()) {
+                                if r_entry.timestamp.is_none() {
+                                    r_entry.timestamp = Some(v_i64);
+                                }
+                            }
                         }
                     } else if k.len() == 5 {
                         if k[2] == "result" && k[3] == "metadata" {
@@ -295,9 +386,9 @@ pub fn parse_copilot_file(file_path: &Path) -> CopilotStats {
     let mtime = std::fs::metadata(file_path)
         .and_then(|m| m.modified())
         .unwrap_or_else(|_| SystemTime::now());
-    let datetime: chrono::DateTime<chrono::Utc> = mtime.into();
-    let date_key = datetime.format("%Y-%m-%d").to_string();
-    let month_key = datetime.format("%Y-%m").to_string();
+    let fallback_dt: DateTime<Local> = mtime.into();
+    let fallback_date_key = fallback_dt.format("%Y-%m-%d").to_string();
+    let fallback_month_key = fallback_dt.format("%Y-%m").to_string();
 
     for (_idx, state) in requests {
         let in_tokens = state.prompt_tokens;
@@ -306,6 +397,23 @@ pub fn parse_copilot_file(file_path: &Path) -> CopilotStats {
         if in_tokens == 0 && out_tokens == 0 {
             continue;
         }
+
+        let req_timestamp = state.timestamp.or(session_creation_date);
+        let (date_key, month_key) = if let Some(ts_ms) = req_timestamp {
+            if let Some(dt) =
+                DateTime::from_timestamp(ts_ms / 1000, ((ts_ms % 1000) * 1_000_000) as u32)
+            {
+                let dt_local: DateTime<Local> = dt.with_timezone(&Local);
+                (
+                    dt_local.format("%Y-%m-%d").to_string(),
+                    dt_local.format("%Y-%m").to_string(),
+                )
+            } else {
+                (fallback_date_key.clone(), fallback_month_key.clone())
+            }
+        } else {
+            (fallback_date_key.clone(), fallback_month_key.clone())
+        };
 
         let model_name = state.model_id.or_else(|| default_model.clone());
         let (input_cost, output_cost) = if state.input_cost.is_some() || state.output_cost.is_some()
@@ -547,6 +655,7 @@ mod tests {
         let mut file = NamedTempFile::new().unwrap();
         let payload = r#"{"kind":0,"v":{"version":3,"sessionId":"test-session-123","requests":[{"requestId":"req1","result":{"metadata":{"promptTokens":100,"outputTokens":50,"details":"Gemini 3.5 Flash"}},"inputState":{"selectedModel":{"identifier":"copilot/gemini-3.5-flash","metadata":{"name":"Gemini 3.5 Flash","inputCost":150,"outputCost":900,"cacheCost":15}}}}]}}"#;
         writeln!(file, "{}", payload).unwrap();
+        file.flush().unwrap();
 
         let stats = parse_copilot_file(file.path());
         assert_eq!(stats.threads_found, 1);
@@ -580,9 +689,193 @@ mod tests {
         // Here, metadata doesn't contain inputCost/outputCost, so it should fallback to pricing.rs (which defaults to gpt-4o pricing or Sonnet pricing, or we get Copilot/unknown)
         let payload = r#"{"kind":0,"v":{"version":3,"sessionId":"test-session-456","requests":[{"requestId":"req1","result":{"metadata":{"promptTokens":1000,"outputTokens":500}},"inputState":{"selectedModel":{"identifier":"gpt-4o"}}}]}}"#;
         writeln!(file, "{}", payload).unwrap();
+        file.flush().unwrap();
 
         let stats = parse_copilot_file(file.path());
         assert_eq!(stats.threads_found, 1);
         assert!(stats.total_cost > 0.0);
+    }
+
+    #[test]
+    fn test_copilot_parser_request_timestamps_multi_day() {
+        let mut file = NamedTempFile::new().unwrap();
+
+        // 1787184000000 ms (2026-08-20 00:00:00 UTC)
+        // 1787616000000 ms (2026-08-25 00:00:00 UTC)
+        let ts1: i64 = 1787184000000;
+        let ts2: i64 = 1787616000000;
+
+        let dt1 = DateTime::from_timestamp(ts1 / 1000, 0)
+            .unwrap()
+            .with_timezone(&Local);
+        let dt2 = DateTime::from_timestamp(ts2 / 1000, 0)
+            .unwrap()
+            .with_timezone(&Local);
+
+        let date_key1 = dt1.format("%Y-%m-%d").to_string();
+        let date_key2 = dt2.format("%Y-%m-%d").to_string();
+
+        let payload = serde_json::json!({
+            "kind": 0,
+            "v": {
+                "version": 3,
+                "creationDate": ts1,
+                "requests": [
+                    {
+                        "requestId": "req1",
+                        "timestamp": ts1,
+                        "result": {
+                            "metadata": {
+                                "promptTokens": 1000,
+                                "outputTokens": 500
+                            }
+                        },
+                        "inputState": {
+                            "selectedModel": {
+                                "identifier": "copilot/gpt-5.6-sol",
+                                "metadata": {
+                                    "inputCost": 500,
+                                    "outputCost": 3000
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "requestId": "req2",
+                        "timestamp": ts2,
+                        "result": {
+                            "metadata": {
+                                "promptTokens": 2000,
+                                "outputTokens": 1000
+                            }
+                        },
+                        "inputState": {
+                            "selectedModel": {
+                                "identifier": "copilot/gpt-5.6-sol",
+                                "metadata": {
+                                    "inputCost": 500,
+                                    "outputCost": 3000
+                                }
+                            }
+                        }
+                    }
+                ]
+            }
+        })
+        .to_string();
+        writeln!(file, "{}", payload).unwrap();
+        file.flush().unwrap();
+
+        let stats = parse_copilot_file(file.path());
+        assert_eq!(stats.threads_found, 1);
+
+        // Verify request 1 is attributed to date_key1
+        let day1_tokens = stats.daily_stats.get(&date_key1).expect("day 1 present");
+        assert_eq!(day1_tokens.in_tokens, 1000);
+        assert_eq!(day1_tokens.out_tokens, 500);
+        assert!(stats.daily_costs.get(&date_key1).unwrap() > &0.0);
+
+        // Verify request 2 is attributed to date_key2
+        let day2_tokens = stats.daily_stats.get(&date_key2).expect("day 2 present");
+        assert_eq!(day2_tokens.in_tokens, 2000);
+        assert_eq!(day2_tokens.out_tokens, 1000);
+        assert!(stats.daily_costs.get(&date_key2).unwrap() > &0.0);
+
+        // Grand total should be sum of both
+        assert_eq!(
+            stats
+                .model_stats
+                .get("copilot/gpt-5.6-sol")
+                .unwrap()
+                .in_tokens,
+            3000
+        );
+        assert_eq!(
+            stats
+                .model_stats
+                .get("copilot/gpt-5.6-sol")
+                .unwrap()
+                .out_tokens,
+            1500
+        );
+    }
+
+    #[test]
+    fn test_copilot_parser_creation_date_fallback() {
+        let mut file = NamedTempFile::new().unwrap();
+        let ts: i64 = 1787184000000; // Aug 20, 2026 UTC
+        let dt = DateTime::from_timestamp(ts / 1000, 0)
+            .unwrap()
+            .with_timezone(&Local);
+        let date_key = dt.format("%Y-%m-%d").to_string();
+
+        // Request has NO timestamp, but root session has creationDate
+        let payload = serde_json::json!({
+            "kind": 0,
+            "v": {
+                "version": 3,
+                "creationDate": ts,
+                "requests": [
+                    {
+                        "requestId": "req1",
+                        "result": {
+                            "metadata": {
+                                "promptTokens": 100,
+                                "outputTokens": 50
+                            }
+                        },
+                        "inputState": {
+                            "selectedModel": {
+                                "identifier": "copilot/gemini-3.5-flash",
+                                "metadata": {
+                                    "inputCost": 150,
+                                    "outputCost": 900
+                                }
+                            }
+                        }
+                    }
+                ]
+            }
+        })
+        .to_string();
+        writeln!(file, "{}", payload).unwrap();
+        file.flush().unwrap();
+
+        let stats = parse_copilot_file(file.path());
+        assert_eq!(stats.threads_found, 1);
+        assert!(stats.daily_stats.contains_key(&date_key));
+        assert_eq!(stats.daily_stats.get(&date_key).unwrap().in_tokens, 100);
+    }
+
+    #[test]
+    fn test_copilot_parser_delta_stream_timestamps() {
+        let mut file = NamedTempFile::new().unwrap();
+        let ts: i64 = 1787184000000; // Aug 20, 2026 UTC
+        let dt = DateTime::from_timestamp(ts / 1000, 0)
+            .unwrap()
+            .with_timezone(&Local);
+        let date_key = dt.format("%Y-%m-%d").to_string();
+
+        // Line 1: empty requests snapshot
+        writeln!(
+            file,
+            r#"{{"kind":0,"v":{{"version":3,"creationDate":{ts},"requests":[]}}}}"#
+        )
+        .unwrap();
+
+        // Line 2: stream delta appending request with timestamp
+        writeln!(
+            file,
+            r#"{{"kind":2,"k":["requests"],"v":[{{"requestId":"req_delta","timestamp":{ts},"modelId":"copilot/kimi-k3","result":{{"metadata":{{"promptTokens":300,"outputTokens":150}}}},"inputState":{{"selectedModel":{{"identifier":"copilot/kimi-k3","metadata":{{"inputCost":300,"outputCost":1500}}}}}}}}]}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let stats = parse_copilot_file(file.path());
+        assert_eq!(stats.threads_found, 1);
+        assert!(stats.daily_stats.contains_key(&date_key));
+        assert_eq!(stats.daily_stats.get(&date_key).unwrap().in_tokens, 300);
+        assert_eq!(stats.daily_stats.get(&date_key).unwrap().out_tokens, 150);
+        assert!(stats.model_stats.contains_key("copilot/kimi-k3"));
     }
 }

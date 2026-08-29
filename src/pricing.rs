@@ -291,6 +291,38 @@ pub fn get_glm_pricing(model: &str) -> ModelPricing {
     }
 }
 
+pub fn get_kimi_pricing(model: &str) -> ModelPricing {
+    let m = model.to_lowercase();
+    if m.contains("kimi-k3") || m.contains("kimi_k3") {
+        ModelPricing {
+            input: 3.00,
+            output: 15.00,
+            cache_write: 0.0,
+            cache_read: 0.30,
+        }
+    } else if m.contains("kimi-k2.7")
+        || m.contains("kimi_k2.7")
+        || m.contains("kimi-k2")
+        || m.contains("kimi_k2")
+    {
+        ModelPricing {
+            input: 0.95,
+            output: 4.00,
+            cache_write: 0.0,
+            cache_read: 0.19,
+        }
+    } else if m.contains("kimi") {
+        ModelPricing {
+            input: 3.00,
+            output: 15.00,
+            cache_write: 0.0,
+            cache_read: 0.30,
+        }
+    } else {
+        ModelPricing::default()
+    }
+}
+
 pub fn get_pricing(model: &str, input_count: i64) -> ModelPricing {
     let m = model.to_lowercase();
     if m.contains("claude") {
@@ -303,9 +335,15 @@ pub fn get_pricing(model: &str, input_count: i64) -> ModelPricing {
         get_openai_pricing(model)
     } else if m.contains("glm-") {
         get_glm_pricing(model)
+    } else if m.contains("kimi") {
+        get_kimi_pricing(model)
     } else {
-        // Try GLM then deepseek then gemini then openai then claude
+        // Try GLM then kimi then deepseek then gemini then openai then claude
         let p = get_glm_pricing(model);
+        if p.input > 0.0 {
+            return p;
+        }
+        let p = get_kimi_pricing(model);
         if p.input > 0.0 {
             return p;
         }
@@ -350,6 +388,60 @@ mod tests {
         assert_eq!(p.input, 1.40);
         assert_eq!(p.output, 4.40);
         assert_eq!(p.cache_read, 0.26);
+
+        let p = get_pricing("copilot/kimi-k3", 0);
+        assert_eq!(p.input, 3.00);
+        assert_eq!(p.output, 15.00);
+        assert_eq!(p.cache_read, 0.30);
+
+        let p = get_pricing("kimi-k3", 0);
+        assert_eq!(p.input, 3.00);
+        assert_eq!(p.output, 15.00);
+        assert_eq!(p.cache_read, 0.30);
+
+        let p = get_pricing("moonshot-ai/kimi-k3-preview", 0);
+        assert_eq!(p.input, 3.00);
+        assert_eq!(p.output, 15.00);
+        assert_eq!(p.cache_read, 0.30);
+
+        let p = get_pricing("copilot/kimi-k2.7", 0);
+        assert_eq!(p.input, 0.95);
+        assert_eq!(p.output, 4.00);
+        assert_eq!(p.cache_read, 0.19);
+    }
+
+    #[test]
+    fn test_kimi_pricing_logic() {
+        for model in &[
+            "kimi-k3",
+            "copilot/kimi-k3",
+            "moonshot-ai/kimi-k3",
+            "kimi_k3",
+            "custom-kimi-k3-long-context",
+        ] {
+            let p = get_kimi_pricing(model);
+            assert_eq!(p.input, 3.00, "Failed for {}", model);
+            assert_eq!(p.output, 15.00, "Failed for {}", model);
+            assert_eq!(p.cache_read, 0.30, "Failed for {}", model);
+            assert_eq!(p.cache_write, 0.0, "Failed for {}", model);
+        }
+
+        for model in &[
+            "kimi-k2.7",
+            "copilot/kimi-k2.7",
+            "kimi-k2",
+            "kimi_k2.7",
+            "moonshot-ai/kimi-k2.7-code",
+        ] {
+            let p = get_kimi_pricing(model);
+            assert_eq!(p.input, 0.95, "Failed for {}", model);
+            assert_eq!(p.output, 4.00, "Failed for {}", model);
+            assert_eq!(p.cache_read, 0.19, "Failed for {}", model);
+            assert_eq!(p.cache_write, 0.0, "Failed for {}", model);
+        }
+
+        let p = get_kimi_pricing("unknown-model");
+        assert_eq!(p.input, 0.0);
     }
 
     #[test]
@@ -576,6 +668,34 @@ mod tests {
         assert!(
             !combined.contains("Warning: Unknown Claude model"),
             "Synthetic model should never trigger warnings:\n{}",
+            combined
+        );
+    }
+
+    #[test]
+    fn test_kimi_model_never_warns() {
+        if std::env::var("RUN_SUBPROCESS_TEST").is_ok() {
+            set_tui_mode(false);
+            get_pricing("copilot/kimi-k3", 0);
+            get_pricing("kimi-k3", 0);
+            get_pricing("moonshot/kimi-k3-preview", 0);
+            return;
+        }
+
+        let current_exe = std::env::current_exe().unwrap();
+        let output = std::process::Command::new(current_exe)
+            .arg("test_kimi_model_never_warns")
+            .arg("--nocapture")
+            .env("RUN_SUBPROCESS_TEST", "1")
+            .output()
+            .expect("failed to execute subprocess");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let combined = format!("STDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
+        assert!(
+            !combined.contains("Warning: Unknown Claude model"),
+            "Kimi model should never trigger unknown Claude model warnings:\n{}",
             combined
         );
     }
