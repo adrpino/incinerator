@@ -1,7 +1,7 @@
+use chrono::{DateTime, Local};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use chrono::{DateTime, Local};
 
 use crate::colors::*;
 use crate::format::{format_float_with_commas, format_int_with_commas};
@@ -400,10 +400,9 @@ pub fn parse_copilot_file(file_path: &Path) -> CopilotStats {
 
         let req_timestamp = state.timestamp.or(session_creation_date);
         let (date_key, month_key) = if let Some(ts_ms) = req_timestamp {
-            if let Some(dt) = DateTime::from_timestamp(
-                ts_ms / 1000,
-                ((ts_ms % 1000) * 1_000_000) as u32,
-            ) {
+            if let Some(dt) =
+                DateTime::from_timestamp(ts_ms / 1000, ((ts_ms % 1000) * 1_000_000) as u32)
+            {
                 let dt_local: DateTime<Local> = dt.with_timezone(&Local);
                 (
                     dt_local.format("%Y-%m-%d").to_string(),
@@ -784,11 +783,19 @@ mod tests {
 
         // Grand total should be sum of both
         assert_eq!(
-            stats.model_stats.get("copilot/gpt-5.6-sol").unwrap().in_tokens,
+            stats
+                .model_stats
+                .get("copilot/gpt-5.6-sol")
+                .unwrap()
+                .in_tokens,
             3000
         );
         assert_eq!(
-            stats.model_stats.get("copilot/gpt-5.6-sol").unwrap().out_tokens,
+            stats
+                .model_stats
+                .get("copilot/gpt-5.6-sol")
+                .unwrap()
+                .out_tokens,
             1500
         );
     }
