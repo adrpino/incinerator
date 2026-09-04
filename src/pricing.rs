@@ -38,6 +38,13 @@ pub fn get_claude_pricing(model: &str) -> ModelPricing {
             cache_write: 3.75,
             cache_read: 0.30,
         }
+    } else if m.contains("fable-5.1") || m.contains("fable-5-1") || m.contains("fable-5_1") {
+        ModelPricing {
+            input: 10.00,
+            output: 50.00,
+            cache_write: 12.50,
+            cache_read: 0.25,
+        }
     } else if m.contains("fable") {
         ModelPricing {
             input: 10.00,
@@ -321,7 +328,7 @@ pub fn get_kimi_pricing(model: &str) -> ModelPricing {
 
 pub fn get_pricing(model: &str, input_count: i64) -> ModelPricing {
     let m = model.to_lowercase();
-    if m.contains("claude") {
+    if m.contains("claude") || m.contains("anthropic") || m.contains("fable") {
         get_claude_pricing(model)
     } else if m.contains("gemini") {
         get_gemini_pricing(model, input_count)
@@ -373,6 +380,18 @@ mod tests {
         assert_eq!(p.output, 25.00);
         assert_eq!(p.cache_write, 6.25);
         assert_eq!(p.cache_read, 0.50);
+
+        let p = get_pricing("claude-fable-5.1", 0);
+        assert_eq!(p.input, 10.00);
+        assert_eq!(p.output, 50.00);
+        assert_eq!(p.cache_write, 12.50);
+        assert_eq!(p.cache_read, 0.25);
+
+        let p = get_pricing("fable-5.1", 0);
+        assert_eq!(p.input, 10.00);
+        assert_eq!(p.output, 50.00);
+        assert_eq!(p.cache_write, 12.50);
+        assert_eq!(p.cache_read, 0.25);
 
         let p = get_pricing("gemini-3.1-pro", 0);
         assert_eq!(p.input, 2.0);
@@ -589,6 +608,18 @@ mod tests {
         assert_eq!(p.cache_write, 12.50);
         assert_eq!(p.cache_read, 1.00);
 
+        let p = get_claude_pricing("claude-fable-5.1");
+        assert_eq!(p.input, 10.00);
+        assert_eq!(p.output, 50.00);
+        assert_eq!(p.cache_write, 12.50);
+        assert_eq!(p.cache_read, 0.25);
+
+        let p = get_claude_pricing("claude-fable-5-1");
+        assert_eq!(p.input, 10.00);
+        assert_eq!(p.output, 50.00);
+        assert_eq!(p.cache_write, 12.50);
+        assert_eq!(p.cache_read, 0.25);
+
         let p = get_claude_pricing("claude-opus-3");
         assert_eq!(p.input, 15.00);
         assert_eq!(p.output, 75.00);
@@ -727,19 +758,21 @@ mod tests {
     }
 
     #[test]
-    fn test_opus_model_never_warns() {
+    fn test_opus_and_fable_model_never_warns() {
         if std::env::var("RUN_SUBPROCESS_TEST").is_ok() {
             set_tui_mode(false);
             get_pricing("claude-opus-5", 0);
             get_pricing("claude-opus-4-8", 0);
             get_pricing("anthropic.claude-opus-5", 0);
             get_pricing("claude-3-opus", 0);
+            get_pricing("claude-fable-5.1", 0);
+            get_pricing("fable-5.1", 0);
             return;
         }
 
         let current_exe = std::env::current_exe().unwrap();
         let output = std::process::Command::new(current_exe)
-            .arg("test_opus_model_never_warns")
+            .arg("test_opus_and_fable_model_never_warns")
             .arg("--nocapture")
             .env("RUN_SUBPROCESS_TEST", "1")
             .output()
@@ -750,7 +783,7 @@ mod tests {
         let combined = format!("STDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
         assert!(
             !combined.contains("Warning: Unknown Claude model"),
-            "Opus model should never trigger unknown Claude model warnings:\n{}",
+            "Opus/Fable model should never trigger unknown Claude model warnings:\n{}",
             combined
         );
     }
