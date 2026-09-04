@@ -512,6 +512,12 @@ mod tests {
         assert_eq!(pricing.input, 5.00);
         assert_eq!(pricing.output, 25.00);
 
+        let pricing = get_claude_pricing("claude-opus-5");
+        assert_eq!(pricing.input, 5.00);
+        assert_eq!(pricing.output, 25.00);
+        assert_eq!(pricing.cache_write, 6.25);
+        assert_eq!(pricing.cache_read, 0.50);
+
         let pricing = get_claude_pricing("claude-haiku-4-5-20251001");
         assert_eq!(pricing.input, 1.00);
         assert_eq!(pricing.output, 5.00);

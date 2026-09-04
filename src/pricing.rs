@@ -45,23 +45,19 @@ pub fn get_claude_pricing(model: &str) -> ModelPricing {
             cache_write: 12.50,
             cache_read: 1.00,
         }
-    } else if m.contains("opus-4")
-        || m.contains("4.6-opus")
-        || m.contains("4.5-opus")
-        || m.contains("4-opus")
-    {
-        ModelPricing {
-            input: 5.00,
-            output: 25.00,
-            cache_write: 6.25,
-            cache_read: 0.50,
-        }
-    } else if m.contains("opus-3") {
+    } else if m.contains("opus-3") || m.contains("3-opus") {
         ModelPricing {
             input: 15.00,
             output: 75.00,
             cache_write: 18.75,
             cache_read: 1.50,
+        }
+    } else if m.contains("opus") {
+        ModelPricing {
+            input: 5.00,
+            output: 25.00,
+            cache_write: 6.25,
+            cache_read: 0.50,
         }
     } else if m.contains("haiku-4-5") || m.contains("haiku-3-5") {
         ModelPricing {
@@ -372,6 +368,12 @@ mod tests {
         let p = get_pricing("claude-sonnet", 0);
         assert_eq!(p.input, 3.0);
 
+        let p = get_pricing("claude-opus-5", 0);
+        assert_eq!(p.input, 5.00);
+        assert_eq!(p.output, 25.00);
+        assert_eq!(p.cache_write, 6.25);
+        assert_eq!(p.cache_read, 0.50);
+
         let p = get_pricing("gemini-3.1-pro", 0);
         assert_eq!(p.input, 2.0);
 
@@ -557,6 +559,24 @@ mod tests {
         assert_eq!(p.cache_write, 6.25);
         assert_eq!(p.cache_read, 0.50);
 
+        let p = get_claude_pricing("claude-opus-5");
+        assert_eq!(p.input, 5.00);
+        assert_eq!(p.output, 25.00);
+        assert_eq!(p.cache_write, 6.25);
+        assert_eq!(p.cache_read, 0.50);
+
+        let p = get_claude_pricing("claude-5-opus");
+        assert_eq!(p.input, 5.00);
+        assert_eq!(p.output, 25.00);
+        assert_eq!(p.cache_write, 6.25);
+        assert_eq!(p.cache_read, 0.50);
+
+        let p = get_claude_pricing("anthropic.claude-opus-5");
+        assert_eq!(p.input, 5.00);
+        assert_eq!(p.output, 25.00);
+        assert_eq!(p.cache_write, 6.25);
+        assert_eq!(p.cache_read, 0.50);
+
         let p = get_claude_pricing("claude-4.6-opus");
         assert_eq!(p.input, 5.00);
         assert_eq!(p.output, 25.00);
@@ -570,6 +590,12 @@ mod tests {
         assert_eq!(p.cache_read, 1.00);
 
         let p = get_claude_pricing("claude-opus-3");
+        assert_eq!(p.input, 15.00);
+        assert_eq!(p.output, 75.00);
+        assert_eq!(p.cache_write, 18.75);
+        assert_eq!(p.cache_read, 1.50);
+
+        let p = get_claude_pricing("claude-3-opus-20240229");
         assert_eq!(p.input, 15.00);
         assert_eq!(p.output, 75.00);
         assert_eq!(p.cache_write, 18.75);
@@ -696,6 +722,35 @@ mod tests {
         assert!(
             !combined.contains("Warning: Unknown Claude model"),
             "Kimi model should never trigger unknown Claude model warnings:\n{}",
+            combined
+        );
+    }
+
+    #[test]
+    fn test_opus_model_never_warns() {
+        if std::env::var("RUN_SUBPROCESS_TEST").is_ok() {
+            set_tui_mode(false);
+            get_pricing("claude-opus-5", 0);
+            get_pricing("claude-opus-4-8", 0);
+            get_pricing("anthropic.claude-opus-5", 0);
+            get_pricing("claude-3-opus", 0);
+            return;
+        }
+
+        let current_exe = std::env::current_exe().unwrap();
+        let output = std::process::Command::new(current_exe)
+            .arg("test_opus_model_never_warns")
+            .arg("--nocapture")
+            .env("RUN_SUBPROCESS_TEST", "1")
+            .output()
+            .expect("failed to execute subprocess");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let combined = format!("STDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
+        assert!(
+            !combined.contains("Warning: Unknown Claude model"),
+            "Opus model should never trigger unknown Claude model warnings:\n{}",
             combined
         );
     }
