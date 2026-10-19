@@ -569,6 +569,7 @@ pub fn print_gemini_report(global_stats: &GeminiStats, parsing_time: f64, daily_
 mod tests {
     use super::*;
     use crate::pricing::get_gemini_pricing;
+    use chrono::Datelike;
 
     #[test]
     fn parses_write_file_preamble() {
@@ -770,6 +771,18 @@ mod tests {
 
     #[test]
     fn test_gemini_pricing() {
+        let pricing = get_gemini_pricing("gemini-4-argon", 0);
+        let now = chrono::Local::now();
+        if now.year() < 2026 || (now.year() == 2026 && now.month() <= 11) {
+            assert_eq!(pricing.input, 2.00);
+            assert_eq!(pricing.output, 10.00);
+            assert_eq!(pricing.cache_read, 0.10);
+        } else {
+            assert_eq!(pricing.input, 4.00);
+            assert_eq!(pricing.output, 20.00);
+            assert_eq!(pricing.cache_read, 0.20);
+        }
+
         let pricing = get_gemini_pricing("gemini-3.1-flash-lite-preview", 0);
         assert_eq!(pricing.input, 0.25);
         assert_eq!(pricing.output, 1.50);

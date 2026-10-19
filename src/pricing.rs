@@ -31,14 +31,11 @@ impl Default for ModelPricing {
 
 pub fn get_claude_pricing(model: &str) -> ModelPricing {
     let m = model.to_lowercase();
-    if m.contains("sonnet") {
-        ModelPricing {
-            input: 3.00,
-            output: 15.00,
-            cache_write: 3.75,
-            cache_read: 0.30,
-        }
-    } else if m.contains("fable-5.1") || m.contains("fable-5-1") || m.contains("fable-5_1") {
+    if m.contains("mythos")
+        || m.contains("fable-5.1")
+        || m.contains("fable-5-1")
+        || m.contains("fable-5_1")
+    {
         ModelPricing {
             input: 10.00,
             output: 50.00,
@@ -51,6 +48,17 @@ pub fn get_claude_pricing(model: &str) -> ModelPricing {
             output: 50.00,
             cache_write: 12.50,
             cache_read: 1.00,
+        }
+    } else if m.contains("opus-5.5")
+        || m.contains("opus-5-5")
+        || m.contains("5.5-opus")
+        || m.contains("5-5-opus")
+    {
+        ModelPricing {
+            input: 4.00,
+            output: 20.00,
+            cache_write: 5.00,
+            cache_read: 0.20,
         }
     } else if m.contains("opus-3") || m.contains("3-opus") {
         ModelPricing {
@@ -66,7 +74,36 @@ pub fn get_claude_pricing(model: &str) -> ModelPricing {
             cache_write: 6.25,
             cache_read: 0.50,
         }
-    } else if m.contains("haiku-4-5") || m.contains("haiku-3-5") {
+    } else if m.contains("sonnet-5.5")
+        || m.contains("sonnet-5-5")
+        || m.contains("5.5-sonnet")
+        || m.contains("5-5-sonnet")
+    {
+        ModelPricing {
+            input: 2.00,
+            output: 10.00,
+            cache_write: 2.50,
+            cache_read: 0.10,
+        }
+    } else if m.contains("sonnet") {
+        ModelPricing {
+            input: 3.00,
+            output: 15.00,
+            cache_write: 3.75,
+            cache_read: 0.30,
+        }
+    } else if m.contains("haiku-5.5")
+        || m.contains("haiku-5-5")
+        || m.contains("5.5-haiku")
+        || m.contains("5-5-haiku")
+    {
+        ModelPricing {
+            input: 0.10,
+            output: 0.50,
+            cache_write: 0.125,
+            cache_read: 0.01,
+        }
+    } else if m.contains("haiku") {
         ModelPricing {
             input: 1.00,
             output: 5.00,
@@ -94,7 +131,14 @@ pub fn get_claude_pricing(model: &str) -> ModelPricing {
 
 pub fn get_gemini_pricing(model: &str, input_count: i64) -> ModelPricing {
     let m = model.to_lowercase();
-    let (input, output, cache) = if m.contains("gemini-3.7-flash") {
+    let (input, output, cache) = if m.contains("gemini-4") || m.contains("argon") {
+        let now = chrono::Local::now();
+        if now.year() < 2026 || (now.year() == 2026 && now.month() <= 11) {
+            (2.00, 10.00, 0.10)
+        } else {
+            (4.00, 20.00, 0.20)
+        }
+    } else if m.contains("gemini-3.7-flash") {
         if chrono::Local::now().year() <= 2026 {
             (0.75, 3.75, 0.075)
         } else {
@@ -171,7 +215,14 @@ pub fn get_deepseek_pricing(model: &str) -> ModelPricing {
 
 pub fn get_openai_pricing(model: &str) -> ModelPricing {
     let m = model.to_lowercase();
-    if m.contains("gpt-5.6-sol") {
+    if m.contains("astra") {
+        ModelPricing {
+            input: 10.00,
+            output: 50.00,
+            cache_write: 12.50,
+            cache_read: 1.00,
+        }
+    } else if m.contains("gpt-5.6-sol") {
         ModelPricing {
             input: 5.00,
             output: 30.00,
@@ -191,6 +242,27 @@ pub fn get_openai_pricing(model: &str) -> ModelPricing {
             output: 1.20,
             cache_write: 0.25,
             cache_read: 0.02,
+        }
+    } else if m.contains("gpt-6-luna") || m.contains("luna") {
+        ModelPricing {
+            input: 0.10,
+            output: 0.50,
+            cache_write: 0.125,
+            cache_read: 0.01,
+        }
+    } else if m.contains("gpt-6.1-sol") || m.contains("gpt-6-1-sol") || m.contains("gpt-6.1") {
+        ModelPricing {
+            input: 2.00,
+            output: 10.00,
+            cache_write: 2.50,
+            cache_read: 0.10,
+        }
+    } else if m.contains("gpt-6-sol") || m.contains("gpt-6") || m.contains("sol") {
+        ModelPricing {
+            input: 2.00,
+            output: 10.00,
+            cache_write: 2.50,
+            cache_read: 0.20,
         }
     } else if m.contains("gpt-5.5-pro") {
         ModelPricing {
@@ -240,6 +312,27 @@ pub fn get_openai_pricing(model: &str) -> ModelPricing {
             output: 10.00,
             cache_write: 0.0,
             cache_read: 0.125,
+        }
+    } else if m.contains("o4-mini") {
+        ModelPricing {
+            input: 1.10,
+            output: 4.40,
+            cache_write: 0.0,
+            cache_read: 0.275,
+        }
+    } else if m.contains("o3-mini") {
+        ModelPricing {
+            input: 1.10,
+            output: 4.40,
+            cache_write: 0.0,
+            cache_read: 0.55,
+        }
+    } else if m.contains("o3") {
+        ModelPricing {
+            input: 2.00,
+            output: 8.00,
+            cache_write: 0.0,
+            cache_read: 0.50,
         }
     } else if m.contains("o1-preview") {
         ModelPricing {
@@ -328,13 +421,24 @@ pub fn get_kimi_pricing(model: &str) -> ModelPricing {
 
 pub fn get_pricing(model: &str, input_count: i64) -> ModelPricing {
     let m = model.to_lowercase();
-    if m.contains("claude") || m.contains("anthropic") || m.contains("fable") {
+    if m.contains("claude")
+        || m.contains("anthropic")
+        || m.contains("fable")
+        || m.contains("mythos")
+    {
         get_claude_pricing(model)
-    } else if m.contains("gemini") {
+    } else if m.contains("gemini") || m.contains("argon") {
         get_gemini_pricing(model, input_count)
     } else if m.contains("deepseek") {
         get_deepseek_pricing(model)
-    } else if m.contains("gpt-") || m.contains("o1-") {
+    } else if m.contains("gpt-")
+        || m.contains("o1-")
+        || m.contains("o3")
+        || m.contains("o4")
+        || m.contains("astra")
+        || m.contains("sol")
+        || m.contains("luna")
+    {
         get_openai_pricing(model)
     } else if m.contains("glm-") {
         get_glm_pricing(model)
@@ -355,11 +459,16 @@ pub fn get_pricing(model: &str, input_count: i64) -> ModelPricing {
             return p;
         }
         let p = get_gemini_pricing(model, input_count);
-        if p.input != 1.0 || m.contains("gemini") {
+        if p.input != 1.0 || m.contains("gemini") || m.contains("argon") {
             return p;
         }
         let p = get_openai_pricing(model);
-        if p.input != 2.5 || m.contains("gpt") {
+        if p.input != 2.5
+            || m.contains("gpt")
+            || m.contains("astra")
+            || m.contains("sol")
+            || m.contains("luna")
+        {
             return p;
         }
         get_claude_pricing(model)
@@ -429,6 +538,94 @@ mod tests {
         assert_eq!(p.input, 0.95);
         assert_eq!(p.output, 4.00);
         assert_eq!(p.cache_read, 0.19);
+
+        // Gemini 4 Argon
+        let p = get_pricing("gemini-4-argon", 0);
+        let now = chrono::Local::now();
+        if now.year() < 2026 || (now.year() == 2026 && now.month() <= 11) {
+            assert_eq!(p.input, 2.00);
+            assert_eq!(p.output, 10.00);
+            assert_eq!(p.cache_read, 0.10);
+        } else {
+            assert_eq!(p.input, 4.00);
+            assert_eq!(p.output, 20.00);
+            assert_eq!(p.cache_read, 0.20);
+        }
+        assert_eq!(p.cache_write, 0.0);
+
+        // OpenAI Astra, Sol, Luna
+        let p = get_pricing("gpt-6-astra", 0);
+        assert_eq!(p.input, 10.00);
+        assert_eq!(p.output, 50.00);
+        assert_eq!(p.cache_write, 12.50);
+        assert_eq!(p.cache_read, 1.00);
+
+        let p = get_pricing("astra", 0);
+        assert_eq!(p.input, 10.00);
+        assert_eq!(p.output, 50.00);
+        assert_eq!(p.cache_write, 12.50);
+        assert_eq!(p.cache_read, 1.00);
+
+        let p = get_pricing("gpt-6.1-sol", 0);
+        assert_eq!(p.input, 2.00);
+        assert_eq!(p.output, 10.00);
+        assert_eq!(p.cache_write, 2.50);
+        assert_eq!(p.cache_read, 0.10);
+
+        let p = get_pricing("gpt-6-sol", 0);
+        assert_eq!(p.input, 2.00);
+        assert_eq!(p.output, 10.00);
+        assert_eq!(p.cache_write, 2.50);
+        assert_eq!(p.cache_read, 0.20);
+
+        let p = get_pricing("sol", 0);
+        assert_eq!(p.input, 2.00);
+        assert_eq!(p.output, 10.00);
+        assert_eq!(p.cache_write, 2.50);
+        assert_eq!(p.cache_read, 0.20);
+
+        let p = get_pricing("gpt-6-luna", 0);
+        assert_eq!(p.input, 0.10);
+        assert_eq!(p.output, 0.50);
+        assert_eq!(p.cache_write, 0.125);
+        assert_eq!(p.cache_read, 0.01);
+
+        let p = get_pricing("luna", 0);
+        assert_eq!(p.input, 0.10);
+        assert_eq!(p.output, 0.50);
+        assert_eq!(p.cache_write, 0.125);
+        assert_eq!(p.cache_read, 0.01);
+
+        // Anthropic Claude 5.x Lineup
+        let p = get_pricing("claude-opus-5.5", 0);
+        assert_eq!(p.input, 4.00);
+        assert_eq!(p.output, 20.00);
+        assert_eq!(p.cache_write, 5.00);
+        assert_eq!(p.cache_read, 0.20);
+
+        let p = get_pricing("claude-sonnet-5.5", 0);
+        assert_eq!(p.input, 2.00);
+        assert_eq!(p.output, 10.00);
+        assert_eq!(p.cache_write, 2.50);
+        assert_eq!(p.cache_read, 0.10);
+
+        let p = get_pricing("claude-haiku-5.5", 0);
+        assert_eq!(p.input, 0.10);
+        assert_eq!(p.output, 0.50);
+        assert_eq!(p.cache_write, 0.125);
+        assert_eq!(p.cache_read, 0.01);
+
+        let p = get_pricing("claude-mythos-5", 0);
+        assert_eq!(p.input, 10.00);
+        assert_eq!(p.output, 50.00);
+        assert_eq!(p.cache_write, 12.50);
+        assert_eq!(p.cache_read, 0.25);
+
+        let p = get_pricing("mythos", 0);
+        assert_eq!(p.input, 10.00);
+        assert_eq!(p.output, 50.00);
+        assert_eq!(p.cache_write, 12.50);
+        assert_eq!(p.cache_read, 0.25);
     }
 
     #[test]
@@ -524,6 +721,77 @@ mod tests {
         assert_eq!(p.output, 1.20);
         assert_eq!(p.cache_read, 0.02);
         assert_eq!(p.cache_write, 0.25);
+
+        // GPT-6 Astra
+        let p = get_openai_pricing("gpt-6-astra");
+        assert_eq!(p.input, 10.00);
+        assert_eq!(p.output, 50.00);
+        assert_eq!(p.cache_write, 12.50);
+        assert_eq!(p.cache_read, 1.00);
+
+        let p = get_openai_pricing("astra");
+        assert_eq!(p.input, 10.00);
+        assert_eq!(p.output, 50.00);
+        assert_eq!(p.cache_write, 12.50);
+        assert_eq!(p.cache_read, 1.00);
+
+        // GPT-6.1 Sol
+        let p = get_openai_pricing("gpt-6.1-sol");
+        assert_eq!(p.input, 2.00);
+        assert_eq!(p.output, 10.00);
+        assert_eq!(p.cache_write, 2.50);
+        assert_eq!(p.cache_read, 0.10);
+
+        // GPT-6 Sol
+        let p = get_openai_pricing("gpt-6-sol");
+        assert_eq!(p.input, 2.00);
+        assert_eq!(p.output, 10.00);
+        assert_eq!(p.cache_write, 2.50);
+        assert_eq!(p.cache_read, 0.20);
+
+        let p = get_openai_pricing("gpt-6");
+        assert_eq!(p.input, 2.00);
+        assert_eq!(p.output, 10.00);
+        assert_eq!(p.cache_write, 2.50);
+        assert_eq!(p.cache_read, 0.20);
+
+        let p = get_openai_pricing("sol");
+        assert_eq!(p.input, 2.00);
+        assert_eq!(p.output, 10.00);
+        assert_eq!(p.cache_write, 2.50);
+        assert_eq!(p.cache_read, 0.20);
+
+        // GPT-6 Luna
+        let p = get_openai_pricing("gpt-6-luna");
+        assert_eq!(p.input, 0.10);
+        assert_eq!(p.output, 0.50);
+        assert_eq!(p.cache_write, 0.125);
+        assert_eq!(p.cache_read, 0.01);
+
+        let p = get_openai_pricing("luna");
+        assert_eq!(p.input, 0.10);
+        assert_eq!(p.output, 0.50);
+        assert_eq!(p.cache_write, 0.125);
+        assert_eq!(p.cache_read, 0.01);
+
+        // Reasoning models: o3, o3-mini, o4-mini
+        let p = get_openai_pricing("o3");
+        assert_eq!(p.input, 2.00);
+        assert_eq!(p.output, 8.00);
+        assert_eq!(p.cache_read, 0.50);
+        assert_eq!(p.cache_write, 0.0);
+
+        let p = get_openai_pricing("o3-mini");
+        assert_eq!(p.input, 1.10);
+        assert_eq!(p.output, 4.40);
+        assert_eq!(p.cache_read, 0.55);
+        assert_eq!(p.cache_write, 0.0);
+
+        let p = get_openai_pricing("o4-mini");
+        assert_eq!(p.input, 1.10);
+        assert_eq!(p.output, 4.40);
+        assert_eq!(p.cache_read, 0.275);
+        assert_eq!(p.cache_write, 0.0);
     }
 
     #[test]
@@ -583,6 +851,54 @@ mod tests {
         assert_eq!(p.output, 25.00);
         assert_eq!(p.cache_write, 6.25);
         assert_eq!(p.cache_read, 0.50);
+
+        let p = get_claude_pricing("claude-opus-5.5");
+        assert_eq!(p.input, 4.00);
+        assert_eq!(p.output, 20.00);
+        assert_eq!(p.cache_write, 5.00);
+        assert_eq!(p.cache_read, 0.20);
+
+        let p = get_claude_pricing("claude-opus-5-5");
+        assert_eq!(p.input, 4.00);
+        assert_eq!(p.output, 20.00);
+        assert_eq!(p.cache_write, 5.00);
+        assert_eq!(p.cache_read, 0.20);
+
+        let p = get_claude_pricing("claude-sonnet-5.5");
+        assert_eq!(p.input, 2.00);
+        assert_eq!(p.output, 10.00);
+        assert_eq!(p.cache_write, 2.50);
+        assert_eq!(p.cache_read, 0.10);
+
+        let p = get_claude_pricing("claude-sonnet-5-5");
+        assert_eq!(p.input, 2.00);
+        assert_eq!(p.output, 10.00);
+        assert_eq!(p.cache_write, 2.50);
+        assert_eq!(p.cache_read, 0.10);
+
+        let p = get_claude_pricing("claude-5-5-sonnet");
+        assert_eq!(p.input, 2.00);
+        assert_eq!(p.output, 10.00);
+        assert_eq!(p.cache_write, 2.50);
+        assert_eq!(p.cache_read, 0.10);
+
+        let p = get_claude_pricing("claude-mythos-5");
+        assert_eq!(p.input, 10.00);
+        assert_eq!(p.output, 50.00);
+        assert_eq!(p.cache_write, 12.50);
+        assert_eq!(p.cache_read, 0.25);
+
+        let p = get_claude_pricing("claude-mythos-5.1");
+        assert_eq!(p.input, 10.00);
+        assert_eq!(p.output, 50.00);
+        assert_eq!(p.cache_write, 12.50);
+        assert_eq!(p.cache_read, 0.25);
+
+        let p = get_claude_pricing("claude-haiku-5.5");
+        assert_eq!(p.input, 0.10);
+        assert_eq!(p.output, 0.50);
+        assert_eq!(p.cache_write, 0.125);
+        assert_eq!(p.cache_read, 0.01);
 
         let p = get_claude_pricing("claude-5-opus");
         assert_eq!(p.input, 5.00);
@@ -761,12 +1077,18 @@ mod tests {
     fn test_opus_and_fable_model_never_warns() {
         if std::env::var("RUN_SUBPROCESS_TEST").is_ok() {
             set_tui_mode(false);
+            get_pricing("claude-opus-5.5", 0);
             get_pricing("claude-opus-5", 0);
             get_pricing("claude-opus-4-8", 0);
             get_pricing("anthropic.claude-opus-5", 0);
             get_pricing("claude-3-opus", 0);
             get_pricing("claude-fable-5.1", 0);
             get_pricing("fable-5.1", 0);
+            get_pricing("claude-fable-5", 0);
+            get_pricing("claude-mythos-5", 0);
+            get_pricing("claude-mythos-5.1", 0);
+            get_pricing("claude-sonnet-5.5", 0);
+            get_pricing("claude-haiku-5.5", 0);
             return;
         }
 
@@ -789,7 +1111,82 @@ mod tests {
     }
 
     #[test]
+    fn test_new_models_never_warn() {
+        if std::env::var("RUN_SUBPROCESS_TEST").is_ok() {
+            set_tui_mode(false);
+            get_pricing("gemini-4-argon", 0);
+            get_pricing("google/gemini-4-argon", 0);
+            get_pricing("argon", 0);
+            get_pricing("gpt-6-astra", 0);
+            get_pricing("gpt-6.1-sol", 0);
+            get_pricing("gpt-6-sol", 0);
+            get_pricing("gpt-6-luna", 0);
+            get_pricing("astra", 0);
+            get_pricing("sol", 0);
+            get_pricing("luna", 0);
+            get_pricing("claude-mythos-5", 0);
+            get_pricing("claude-opus-5.5", 0);
+            get_pricing("claude-sonnet-5.5", 0);
+            get_pricing("claude-haiku-5.5", 0);
+            return;
+        }
+
+        let current_exe = std::env::current_exe().unwrap();
+        let output = std::process::Command::new(current_exe)
+            .arg("test_new_models_never_warn")
+            .arg("--nocapture")
+            .env("RUN_SUBPROCESS_TEST", "1")
+            .output()
+            .expect("failed to execute subprocess");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let combined = format!("STDOUT:\n{}\nSTDERR:\n{}", stdout, stderr);
+        assert!(
+            !combined.contains("Warning: Unknown Claude model"),
+            "New models should never trigger unknown Claude model warnings:\n{}",
+            combined
+        );
+    }
+
+    #[test]
     fn test_gemini_pricing_logic() {
+        // Gemini 4 Argon
+        let p = get_gemini_pricing("gemini-4-argon", 0);
+        let now = chrono::Local::now();
+        if now.year() < 2026 || (now.year() == 2026 && now.month() <= 11) {
+            assert_eq!(p.input, 2.00);
+            assert_eq!(p.output, 10.00);
+            assert_eq!(p.cache_read, 0.10);
+        } else {
+            assert_eq!(p.input, 4.00);
+            assert_eq!(p.output, 20.00);
+            assert_eq!(p.cache_read, 0.20);
+        }
+        assert_eq!(p.cache_write, 0.0);
+
+        let p = get_gemini_pricing("google/gemini-4-argon", 0);
+        if now.year() < 2026 || (now.year() == 2026 && now.month() <= 11) {
+            assert_eq!(p.input, 2.00);
+            assert_eq!(p.output, 10.00);
+            assert_eq!(p.cache_read, 0.10);
+        } else {
+            assert_eq!(p.input, 4.00);
+            assert_eq!(p.output, 20.00);
+            assert_eq!(p.cache_read, 0.20);
+        }
+
+        let p = get_gemini_pricing("argon", 0);
+        if now.year() < 2026 || (now.year() == 2026 && now.month() <= 11) {
+            assert_eq!(p.input, 2.00);
+            assert_eq!(p.output, 10.00);
+            assert_eq!(p.cache_read, 0.10);
+        } else {
+            assert_eq!(p.input, 4.00);
+            assert_eq!(p.output, 20.00);
+            assert_eq!(p.cache_read, 0.20);
+        }
+
         // Flash Lite
         let p = get_gemini_pricing("gemini-3.1-flash-lite-preview", 0);
         assert_eq!(p.input, 0.25);
