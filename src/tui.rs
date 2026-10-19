@@ -26,6 +26,7 @@ use crate::eco::format_eco_metrics;
 use crate::format::{format_currency, format_int_with_commas, format_tokens};
 use crate::gemini::GeminiStats;
 use crate::opencode::{OpencodeStats, get_opencode_db_path, parse_opencode_db};
+use crate::pricing::get_pricing;
 use crate::unified::UnifiedStats;
 use crate::zed::ZedStats;
 use std::path::PathBuf;
@@ -1009,7 +1010,7 @@ impl App {
         let mut model_list: Vec<(String, crate::viz::TokenStats, f64)> = models_map
             .iter()
             .map(|(name, stats)| {
-                let pricing = crate::pricing::get_pricing(name, stats.in_tokens);
+                let pricing = get_pricing(name, stats.in_tokens);
                 let cost = (stats.in_tokens as f64 * pricing.input
                     + stats.out_tokens as f64 * pricing.output
                     + stats.cache_read_tokens as f64 * pricing.cache_read
@@ -1137,7 +1138,7 @@ impl App {
             )));
         } else {
             let (name, stats, cost) = &model_list[selected_idx];
-            let pricing = crate::pricing::get_pricing(name, stats.in_tokens);
+            let pricing = get_pricing(name, stats.in_tokens);
 
             detail_lines.push(Line::from(vec![
                 Span::styled(
@@ -1150,11 +1151,19 @@ impl App {
             // Try to infer provider based on model name prefix or daily filter
             let inferred_provider = if name.contains("copilot") {
                 "Copilot (GitHub)"
-            } else if name.contains("claude") || name.contains("anthropic") {
+            } else if name.contains("claude")
+                || name.contains("anthropic")
+                || name.contains("fable")
+                || name.contains("mythos")
+            {
                 "Claude Code (Anthropic)"
-            } else if name.contains("gemini") {
+            } else if name.contains("gemini") || name.contains("argon") {
                 "Gemini CLI (Google)"
-            } else if name.contains("gpt-") {
+            } else if name.contains("gpt-")
+                || name.contains("astra")
+                || name.contains("sol")
+                || name.contains("luna")
+            {
                 "OpenAI (via Cline/Zed)"
             } else if name.contains("deepseek") {
                 "DeepSeek"

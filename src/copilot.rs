@@ -5,6 +5,7 @@ use std::time::SystemTime;
 
 use crate::colors::*;
 use crate::format::{format_float_with_commas, format_int_with_commas};
+use crate::pricing::get_pricing;
 use crate::viz::{TokenStats, print_cost_bar, print_token_bar};
 
 #[derive(Default, Clone, Debug)]
@@ -433,7 +434,7 @@ pub fn parse_copilot_file(file_path: &Path) -> CopilotStats {
                     + (out_tokens as f64 / 1_000_000.0 * usd_out_price)
             }
             _ => {
-                let pricing = crate::pricing::get_pricing(&model_name, in_tokens);
+                let pricing = get_pricing(&model_name, in_tokens);
                 (in_tokens as f64 / 1_000_000.0 * pricing.input)
                     + (out_tokens as f64 / 1_000_000.0 * pricing.output)
             }

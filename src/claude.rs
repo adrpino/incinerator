@@ -524,6 +524,30 @@ mod tests {
         assert_eq!(pricing.cache_write, 12.50);
         assert_eq!(pricing.cache_read, 0.25);
 
+        let pricing = get_claude_pricing("claude-opus-5.5");
+        assert_eq!(pricing.input, 4.00);
+        assert_eq!(pricing.output, 20.00);
+        assert_eq!(pricing.cache_write, 5.00);
+        assert_eq!(pricing.cache_read, 0.20);
+
+        let pricing = get_claude_pricing("claude-sonnet-5.5");
+        assert_eq!(pricing.input, 2.00);
+        assert_eq!(pricing.output, 10.00);
+        assert_eq!(pricing.cache_write, 2.50);
+        assert_eq!(pricing.cache_read, 0.10);
+
+        let pricing = get_claude_pricing("claude-haiku-5.5");
+        assert_eq!(pricing.input, 0.10);
+        assert_eq!(pricing.output, 0.50);
+        assert_eq!(pricing.cache_write, 0.125);
+        assert_eq!(pricing.cache_read, 0.01);
+
+        let pricing = get_claude_pricing("claude-mythos-5");
+        assert_eq!(pricing.input, 10.00);
+        assert_eq!(pricing.output, 50.00);
+        assert_eq!(pricing.cache_write, 12.50);
+        assert_eq!(pricing.cache_read, 0.25);
+
         let pricing = get_claude_pricing("claude-haiku-4-5-20251001");
         assert_eq!(pricing.input, 1.00);
         assert_eq!(pricing.output, 5.00);
