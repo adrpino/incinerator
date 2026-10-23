@@ -1,13 +1,17 @@
 use chrono::{DateTime, Local};
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
-use std::time::Instant;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::colors::*;
 use crate::format::{format_float_with_commas, format_int_with_commas};
+use crate::languages::LanguageAnalyzer;
 use crate::viz::{TokenStats, print_cost_bar, print_token_bar};
+
+const MSG_TAIL_WINDOW: i64 = 64;
+const PART_TAIL_WINDOW: i64 = 128;
 
 #[derive(Default, Clone)]
 pub struct OpencodeStats {
@@ -18,7 +22,15 @@ pub struct OpencodeStats {
     pub monthly_stats: BTreeMap<String, TokenStats>,
     pub model_stats: HashMap<String, TokenStats>,
     pub sessions_found: usize,
-    pub languages: crate::languages::LanguageAnalyzer,
+    pub languages: LanguageAnalyzer,
+}
+
+#[derive(Default, Clone)]
+pub struct OpencodeCacheState {
+    pub checkpoint_msg_rowid: i64,
+    pub checkpoint_part_rowid: i64,
+    pub checkpoint_sessions: HashSet<String>,
+    pub checkpoint_stats: OpencodeStats,
 }
 
 #[allow(dead_code)]
@@ -29,13 +41,93 @@ pub struct OpencodeModelJson {
     pub provider_id: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+struct OpencodeCacheTokens {
+    #[serde(default)]
+    read: Option<i64>,
+    #[serde(default)]
+    write: Option<i64>,
+}
+
+#[derive(Deserialize, Default)]
+struct OpencodeTokens {
+    #[serde(default)]
+    input: Option<i64>,
+    #[serde(default)]
+    output: Option<i64>,
+    #[serde(default)]
+    reasoning: Option<i64>,
+    #[serde(default)]
+    cache: Option<OpencodeCacheTokens>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OpencodeModelField {
+    Str(String),
+    Obj {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(rename = "modelID", default)]
+        model_id: Option<String>,
+    },
+    Other(serde_json::Value),
+}
+
+impl OpencodeModelField {
+    fn into_model_name(self) -> String {
+        match self {
+            OpencodeModelField::Str(s) => parse_model_id(&s),
+            OpencodeModelField::Obj { id, model_id } => {
+                id.or(model_id).unwrap_or_else(|| "unknown".to_string())
+            }
+            OpencodeModelField::Other(val) => {
+                if let Some(s) = val.as_str() {
+                    parse_model_id(s)
+                } else if let Some(id) = val.get("id").and_then(|v| v.as_str()) {
+                    id.to_string()
+                } else if let Some(id) = val.get("modelID").and_then(|v| v.as_str()) {
+                    id.to_string()
+                } else {
+                    "unknown".to_string()
+                }
+            }
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct OpencodeMessageData {
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(rename = "modelID", default)]
+    model_id: Option<OpencodeModelField>,
+    #[serde(default)]
+    cost: Option<f64>,
+    #[serde(default)]
+    tokens: Option<OpencodeTokens>,
+}
+
 pub fn get_opencode_db_path() -> Option<PathBuf> {
     let base = dirs::home_dir()?;
     let path = base.join(".local/share/opencode/opencode.db");
     if path.exists() { Some(path) } else { None }
 }
 
+pub fn open_readonly_connection(db_path: &Path) -> Option<Connection> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(db_path, flags)
+        .or_else(|_| Connection::open(db_path))
+        .ok()?;
+    let _ = conn.busy_timeout(Duration::from_millis(250));
+    let _ = conn.execute_batch("PRAGMA temp_store = MEMORY; PRAGMA mmap_size = 2147483648;");
+    Some(conn)
+}
+
 pub fn parse_model_id(raw: &str) -> String {
+    if !raw.starts_with('{') {
+        return raw.to_string();
+    }
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) {
         if let Some(id) = val.get("id").and_then(|v| v.as_str()) {
             return id.to_string();
@@ -44,11 +136,7 @@ pub fn parse_model_id(raw: &str) -> String {
             return id.to_string();
         }
     }
-    if raw.starts_with('{') {
-        "unknown".to_string()
-    } else {
-        raw.to_string()
-    }
+    "unknown".to_string()
 }
 
 pub fn parse_opencode_db() -> Option<OpencodeStats> {
@@ -57,72 +145,284 @@ pub fn parse_opencode_db() -> Option<OpencodeStats> {
 }
 
 pub fn parse_opencode_db_at(db_path: PathBuf) -> Option<OpencodeStats> {
-    let conn = Connection::open(db_path).ok()?;
+    let conn = open_readonly_connection(&db_path)?;
     parse_opencode_connection(&conn)
 }
 
-pub fn parse_opencode_connection(conn: &Connection) -> Option<OpencodeStats> {
-    let mut stats = OpencodeStats::default();
-    let mut unique_sessions = std::collections::HashSet::new();
+pub fn parse_opencode_db_incremental(
+    db_path: &Path,
+    prev: Option<&OpencodeCacheState>,
+) -> Option<(OpencodeStats, OpencodeCacheState)> {
+    let conn = open_readonly_connection(db_path)?;
+    parse_opencode_connection_incremental(&conn, prev)
+}
 
-    // 1. Try to query `message` table first to get per-message granularity
-    let message_query_success = if let Ok(mut stmt) = conn.prepare(
-        "SELECT \
-         session_id, \
-         json_extract(data, '$.modelID'), \
-         json_extract(data, '$.cost'), \
-         json_extract(data, '$.tokens.input'), \
-         json_extract(data, '$.tokens.output'), \
-         json_extract(data, '$.tokens.reasoning'), \
-         json_extract(data, '$.tokens.cache.read'), \
-         json_extract(data, '$.tokens.cache.write'), \
-         time_created \
+pub fn parse_opencode_connection(conn: &Connection) -> Option<OpencodeStats> {
+    let (stats, _) = parse_opencode_connection_incremental(conn, None)?;
+    Some(stats)
+}
+
+pub fn parse_opencode_connection_incremental(
+    conn: &Connection,
+    prev: Option<&OpencodeCacheState>,
+) -> Option<(OpencodeStats, OpencodeCacheState)> {
+    parse_opencode_connection_with_path(conn, prev)
+}
+
+fn scan_message_range(
+    conn: &Connection,
+    start_rowid: i64,
+    end_rowid: i64,
+    stats: &mut OpencodeStats,
+    unique_sessions: &mut HashSet<String>,
+) -> bool {
+    if end_rowid <= start_rowid {
+        return true;
+    }
+
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT session_id, data, time_created \
          FROM message \
-         WHERE json_extract(data, '$.role') = 'assistant'",
+         WHERE rowid > ?1 AND rowid <= ?2 \
+           AND LENGTH(data) < 65536 \
+           AND (data GLOB '{\"role\":\"assistant\"*' OR json_extract(data, '$.role') = 'assistant')",
+    ) else {
+        return false;
+    };
+
+    let Ok(rows) = stmt.query_map([start_rowid, end_rowid], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    }) else {
+        return false;
+    };
+
+    for row in rows.flatten() {
+        let (session_id, data_str, time_created) = row;
+        let Ok(msg) = serde_json::from_str::<OpencodeMessageData>(&data_str) else {
+            continue;
+        };
+        if msg.role.as_deref() != Some("assistant") {
+            continue;
+        }
+
+        if let Some(sid) = session_id {
+            unique_sessions.insert(sid);
+        }
+
+        let cost = msg.cost.unwrap_or(0.0);
+        let tokens = msg.tokens.unwrap_or_default();
+        let tokens_in = tokens.input.unwrap_or(0);
+        let tokens_out = tokens.output.unwrap_or(0);
+        let tokens_reasoning = tokens.reasoning.unwrap_or(0);
+        let cache = tokens.cache.unwrap_or_default();
+        let cache_read = cache.read.unwrap_or(0);
+        let cache_write = cache.write.unwrap_or(0);
+
+        let model_name = msg
+            .model_id
+            .map(OpencodeModelField::into_model_name)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let dt = DateTime::from_timestamp(
+            time_created / 1000,
+            ((time_created % 1000) * 1_000_000) as u32,
+        )
+        .map(|dt| dt.with_timezone(&Local))
+        .unwrap_or_else(Local::now);
+
+        let date_key = dt.format("%Y-%m-%d").to_string();
+        let month_key = dt.format("%Y-%m").to_string();
+
+        *stats.daily_costs.entry(date_key.clone()).or_insert(0.0) += cost;
+        *stats.monthly_costs.entry(month_key.clone()).or_insert(0.0) += cost;
+        stats.total_cost += cost;
+
+        let entry = TokenStats {
+            in_tokens: tokens_in,
+            out_tokens: tokens_out + tokens_reasoning,
+            cache_read_tokens: cache_read,
+            cache_create_tokens: cache_write,
+        };
+
+        stats.daily_stats.entry(date_key).or_default().add(&entry);
+        stats
+            .monthly_stats
+            .entry(month_key)
+            .or_default()
+            .add(&entry);
+        stats.model_stats.entry(model_name).or_default().add(&entry);
+    }
+
+    true
+}
+
+fn scan_part_range(
+    conn: &Connection,
+    start_rowid: i64,
+    end_rowid: i64,
+    languages: &mut LanguageAnalyzer,
+) {
+    if end_rowid <= start_rowid {
+        return;
+    }
+
+    let Ok(mut part_stmt) = conn.prepare(
+        "SELECT \
+         COALESCE( \
+           json_extract(data, '$.path'), \
+           json_extract(data, '$.file_path'), \
+           json_extract(data, '$.filePath'), \
+           json_extract(data, '$.state.input.filePath'), \
+           json_extract(data, '$.state.input.file_path'), \
+           json_extract(data, '$.state.input.path') \
+         ), \
+         COALESCE( \
+           json_extract(data, '$.bytes'), \
+           json_extract(data, '$.size'), \
+           LENGTH(json_extract(data, '$.content')), \
+           LENGTH(json_extract(data, '$.patch')), \
+           LENGTH(json_extract(data, '$.state.input.content')), \
+           LENGTH(json_extract(data, '$.state.input.newString')), \
+           LENGTH(json_extract(data, '$.state.input.new_string')), \
+           0 \
+         ) \
+         FROM part \
+         WHERE rowid > ?1 AND rowid <= ?2 \
+           AND ( \
+             data GLOB '{\"type\":\"patch\"*' \
+             OR data GLOB '{\"type\":\"file\"*' \
+             OR data GLOB '{\"type\":\"tool\",\"tool\":\"edit\"*' \
+             OR data GLOB '{\"type\":\"tool\",\"tool\":\"write\"*' \
+             OR (LENGTH(data) < 4096 AND json_extract(data, '$.type') IN ('patch', 'file', 'tool')) \
+           )",
+    ) else {
+        return;
+    };
+
+    if let Ok(part_rows) = part_stmt.query_map([start_rowid, end_rowid], |row| {
+        Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?))
+    }) {
+        for row in part_rows.flatten() {
+            if let (Some(p), bytes) = row {
+                languages.record_file_edit(&p, bytes.max(0) as usize);
+            }
+        }
+    }
+}
+
+fn parse_opencode_connection_with_path(
+    conn: &Connection,
+    prev: Option<&OpencodeCacheState>,
+) -> Option<(OpencodeStats, OpencodeCacheState)> {
+    let max_msg_rowid_res: Result<i64, _> =
+        conn.query_row("SELECT COALESCE(MAX(rowid), 0) FROM message", [], |r| {
+            r.get(0)
+        });
+
+    let max_part_rowid: i64 = conn
+        .query_row("SELECT COALESCE(MAX(rowid), 0) FROM part", [], |r| r.get(0))
+        .unwrap_or(0);
+
+    if let Ok(max_msg_rowid) = max_msg_rowid_res {
+        let mut cache_state = match prev {
+            Some(p)
+                if max_msg_rowid >= p.checkpoint_msg_rowid
+                    && max_part_rowid >= p.checkpoint_part_rowid =>
+            {
+                p.clone()
+            }
+            _ => OpencodeCacheState::default(),
+        };
+
+        let target_msg_cp = max_msg_rowid.saturating_sub(MSG_TAIL_WINDOW);
+        if target_msg_cp > cache_state.checkpoint_msg_rowid {
+            let prev_cp = cache_state.checkpoint_msg_rowid;
+            scan_message_range(
+                conn,
+                prev_cp,
+                target_msg_cp,
+                &mut cache_state.checkpoint_stats,
+                &mut cache_state.checkpoint_sessions,
+            );
+            cache_state.checkpoint_msg_rowid = target_msg_cp;
+        }
+
+        let target_part_cp = max_part_rowid.saturating_sub(PART_TAIL_WINDOW);
+        if target_part_cp > cache_state.checkpoint_part_rowid {
+            let prev_cp = cache_state.checkpoint_part_rowid;
+            scan_part_range(
+                conn,
+                prev_cp,
+                target_part_cp,
+                &mut cache_state.checkpoint_stats.languages,
+            );
+            cache_state.checkpoint_part_rowid = target_part_cp;
+        }
+
+        let mut live_stats = cache_state.checkpoint_stats.clone();
+        let mut live_sessions = cache_state.checkpoint_sessions.clone();
+
+        if max_msg_rowid > cache_state.checkpoint_msg_rowid {
+            scan_message_range(
+                conn,
+                cache_state.checkpoint_msg_rowid,
+                max_msg_rowid,
+                &mut live_stats,
+                &mut live_sessions,
+            );
+        }
+        live_stats.sessions_found = live_sessions.len();
+
+        if max_part_rowid > cache_state.checkpoint_part_rowid {
+            scan_part_range(
+                conn,
+                cache_state.checkpoint_part_rowid,
+                max_part_rowid,
+                &mut live_stats.languages,
+            );
+        }
+
+        return Some((live_stats, cache_state));
+    }
+
+    // Fallback to `session` table if `message` table is not present
+    let mut stats = OpencodeStats::default();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT model, cost, tokens_input, tokens_output, tokens_reasoning, \
+         tokens_cache_read, tokens_cache_write, time_created FROM session",
     ) {
         if let Ok(rows) = stmt.query_map([], |row| {
             Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<f64>>(2)?,
-                row.get::<_, Option<i64>>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-                row.get::<_, Option<i64>>(5)?,
-                row.get::<_, Option<i64>>(6)?,
-                row.get::<_, Option<i64>>(7)?,
-                row.get::<_, i64>(8)?,
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
             ))
         }) {
             for row in rows.flatten() {
                 let (
-                    session_id,
-                    model_raw,
-                    cost_opt,
-                    tokens_in_opt,
-                    tokens_out_opt,
-                    tokens_reasoning_opt,
-                    cache_read_opt,
-                    cache_write_opt,
+                    model_json,
+                    cost,
+                    tokens_in,
+                    tokens_out,
+                    tokens_reasoning,
+                    cache_read,
+                    cache_write,
                     time_created,
                 ) = row;
 
-                if let Some(sid) = session_id {
-                    unique_sessions.insert(sid);
-                }
+                stats.sessions_found += 1;
 
-                let cost = cost_opt.unwrap_or(0.0);
-                let tokens_in = tokens_in_opt.unwrap_or(0);
-                let tokens_out = tokens_out_opt.unwrap_or(0);
-                let tokens_reasoning = tokens_reasoning_opt.unwrap_or(0);
-                let cache_read = cache_read_opt.unwrap_or(0);
-                let cache_write = cache_write_opt.unwrap_or(0);
+                let model_name = parse_model_id(&model_json);
 
-                let model_name = model_raw
-                    .as_deref()
-                    .map(parse_model_id)
-                    .unwrap_or_else(|| "unknown".to_string());
-
-                // Format Dates (using Local timezone to align with TUI)
                 let dt = DateTime::from_timestamp(
                     time_created / 1000,
                     ((time_created % 1000) * 1_000_000) as u32,
@@ -144,154 +444,22 @@ pub fn parse_opencode_connection(conn: &Connection) -> Option<OpencodeStats> {
                     cache_create_tokens: cache_write,
                 };
 
-                stats
-                    .daily_stats
-                    .entry(date_key.clone())
-                    .or_default()
-                    .add(&entry);
+                stats.daily_stats.entry(date_key).or_default().add(&entry);
                 stats
                     .monthly_stats
-                    .entry(month_key.clone())
+                    .entry(month_key)
                     .or_default()
                     .add(&entry);
                 stats.model_stats.entry(model_name).or_default().add(&entry);
             }
-            stats.sessions_found = unique_sessions.len();
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    // 2. Fallback to `session` table if `message` table query fails or is not present
-    if !message_query_success {
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT model, cost, tokens_input, tokens_output, tokens_reasoning, \
-             tokens_cache_read, tokens_cache_write, time_created FROM session",
-        ) {
-            if let Ok(rows) = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?, // model (JSON string)
-                    row.get::<_, f64>(1)?,    // cost
-                    row.get::<_, i64>(2)?,    // tokens_input
-                    row.get::<_, i64>(3)?,    // tokens_output
-                    row.get::<_, i64>(4)?,    // tokens_reasoning
-                    row.get::<_, i64>(5)?,    // tokens_cache_read
-                    row.get::<_, i64>(6)?,    // tokens_cache_write
-                    row.get::<_, i64>(7)?,    // time_created (epoch ms)
-                ))
-            }) {
-                for row in rows.flatten() {
-                    let (
-                        model_json,
-                        cost,
-                        tokens_in,
-                        tokens_out,
-                        tokens_reasoning,
-                        cache_read,
-                        cache_write,
-                        time_created,
-                    ) = row;
-
-                    stats.sessions_found += 1;
-
-                    let model_name = parse_model_id(&model_json);
-
-                    // Format Dates (using Local timezone to align with TUI)
-                    let dt = DateTime::from_timestamp(
-                        time_created / 1000,
-                        ((time_created % 1000) * 1_000_000) as u32,
-                    )
-                    .map(|dt| dt.with_timezone(&Local))
-                    .unwrap_or_else(Local::now);
-
-                    let date_key = dt.format("%Y-%m-%d").to_string();
-                    let month_key = dt.format("%Y-%m").to_string();
-
-                    *stats.daily_costs.entry(date_key.clone()).or_insert(0.0) += cost;
-                    *stats.monthly_costs.entry(month_key.clone()).or_insert(0.0) += cost;
-                    stats.total_cost += cost;
-
-                    let entry = TokenStats {
-                        in_tokens: tokens_in,
-                        out_tokens: tokens_out + tokens_reasoning,
-                        cache_read_tokens: cache_read,
-                        cache_create_tokens: cache_write,
-                    };
-
-                    stats
-                        .daily_stats
-                        .entry(date_key.clone())
-                        .or_default()
-                        .add(&entry);
-                    stats
-                        .monthly_stats
-                        .entry(month_key.clone())
-                        .or_default()
-                        .add(&entry);
-                    stats.model_stats.entry(model_name).or_default().add(&entry);
-                }
-            }
         }
     }
 
-    // 3. Populate language statistics from the `part` table if available
-    if let Ok(mut part_stmt) = conn.prepare(
-        "SELECT \
-         json_extract(data, '$.path'), \
-         json_extract(data, '$.file_path'), \
-         json_extract(data, '$.filePath'), \
-         json_extract(data, '$.bytes'), \
-         json_extract(data, '$.size'), \
-         json_extract(data, '$.content'), \
-         json_extract(data, '$.patch') \
-         FROM part \
-         WHERE json_extract(data, '$.type') IN ('patch', 'file', 'tool')",
-    ) {
-        if let Ok(part_rows) = part_stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<i64>>(3)?,
-                row.get::<_, Option<i64>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-            ))
-        }) {
-            for row in part_rows.flatten() {
-                let (
-                    path_opt,
-                    file_path_opt,
-                    file_path_camel_opt,
-                    bytes_opt,
-                    size_opt,
-                    content_opt,
-                    patch_opt,
-                ) = row;
-
-                let path = path_opt.or(file_path_opt).or(file_path_camel_opt);
-                if let Some(p) = path {
-                    let bytes = if let Some(b) = bytes_opt {
-                        b as usize
-                    } else if let Some(s) = size_opt {
-                        s as usize
-                    } else if let Some(c) = content_opt {
-                        c.len()
-                    } else if let Some(pt) = patch_opt {
-                        pt.len()
-                    } else {
-                        0
-                    };
-                    stats.languages.record_file_edit(&p, bytes);
-                }
-            }
-        }
+    if max_part_rowid > 0 {
+        scan_part_range(conn, 0, max_part_rowid, &mut stats.languages);
     }
 
-    Some(stats)
+    Some((stats, OpencodeCacheState::default()))
 }
 
 pub fn run_opencode_report() -> Option<(OpencodeStats, f64)> {
@@ -672,6 +840,81 @@ mod tests {
         assert_eq!(
             stats.languages.stats.get("Python").map(|s| s.bytes),
             Some(300)
+        );
+
+        // 3. Test incremental caching with an additional message and part
+        let (stats_init, cache_state) = parse_opencode_connection_incremental(&conn, None).unwrap();
+        assert_eq!(stats_init.sessions_found, 1);
+
+        let day3_ms: i64 = 1781700898227; // June 17, 2026
+        let message_data3 = serde_json::json!({
+            "role": "assistant",
+            "modelID": "gemini-3.5-flash",
+            "cost": 0.005,
+            "tokens": {
+                "input": 500,
+                "output": 200,
+                "reasoning": 50,
+                "cache": {
+                    "read": 100,
+                    "write": 50
+                }
+            }
+        })
+        .to_string();
+
+        conn.execute(
+            "INSERT INTO message (id, session_id, data, time_created) VALUES (?1, ?2, ?3, ?4)",
+            ("msg-3", "session-1", message_data3, day3_ms),
+        )
+        .unwrap();
+
+        let part_data3 = serde_json::json!({
+            "type": "tool",
+            "tool": "edit",
+            "state": {
+                "status": "completed",
+                "input": {
+                    "filePath": "src/lib.rs",
+                    "newString": "pub fn hello() {}"
+                }
+            }
+        })
+        .to_string();
+
+        conn.execute(
+            "INSERT INTO part (id, message_id, data, time_created) VALUES (?1, ?2, ?3, ?4)",
+            ("part-3", "msg-3", part_data3, day3_ms),
+        )
+        .unwrap();
+
+        let (stats_inc, _) =
+            parse_opencode_connection_incremental(&conn, Some(&cache_state)).unwrap();
+
+        // Must accurately reflect the newly added message and part
+        assert_eq!(stats_inc.total_cost, 0.008);
+        let model_stat_inc = stats_inc.model_stats.get("gemini-3.5-flash").unwrap();
+        assert_eq!(model_stat_inc.in_tokens, 800); // 300 + 500
+        assert_eq!(model_stat_inc.out_tokens, 850); // 600 + 250
+        assert_eq!(
+            stats_inc.languages.stats.get("Rust").map(|s| s.occurrences),
+            Some(2)
+        );
+
+        // Incremental stats must match a fresh cold parse exactly
+        let stats_cold = parse_opencode_connection(&conn).unwrap();
+        assert_eq!(stats_inc.total_cost, stats_cold.total_cost);
+        assert_eq!(
+            stats_inc
+                .model_stats
+                .get("gemini-3.5-flash")
+                .unwrap()
+                .total(),
+            stats_cold
+                .model_stats
+                .get("gemini-3.5-flash")
+                .unwrap()
+                .total()
         );
     }
 }

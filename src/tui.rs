@@ -7,16 +7,19 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Bar, BarChart, BarGroup, Block, Borders, Paragraph, Tabs},
 };
+use rayon::prelude::*;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::antigravity::{AntigravityStats, get_antigravity_storage_path, parse_antigravity_db};
-use crate::claude::ClaudeStats;
-use crate::cline::ClineStats;
+use crate::antigravity::{AntigravityStats, get_antigravity_files, parse_antigravity_file};
+use crate::claude::{ClaudeStats, get_claude_files, parse_claude_file_incremental};
+use crate::cline::{ClineStats, get_cline_files, parse_cline_file};
 use crate::colors::{
     TUI_CYAN, TUI_DARK_GRAY, TUI_FLAME_ORANGE_1, TUI_FLAME_ORANGE_2, TUI_FLAME_RED_1,
     TUI_FLAME_YELLOW_2, TUI_ORANGE_601, TUI_RED, TUI_WHITE, TUI_YELLOW, ThemeType,
@@ -24,12 +27,17 @@ use crate::colors::{
 use crate::copilot::{CopilotStats, get_copilot_files, parse_copilot_file};
 use crate::eco::format_eco_metrics;
 use crate::format::{format_currency, format_int_with_commas, format_tokens};
-use crate::gemini::GeminiStats;
-use crate::opencode::{OpencodeStats, get_opencode_db_path, parse_opencode_db};
+use crate::gemini::{
+    GeminiStats, get_gemini_and_tool_output_files, parse_gemini_file_incremental,
+    parse_gemini_tool_output_file,
+};
+use crate::languages::LanguageAnalyzer;
+use crate::opencode::{
+    OpencodeCacheState, OpencodeStats, get_opencode_db_path, parse_opencode_db_incremental,
+};
 use crate::pricing::get_pricing;
-use crate::unified::UnifiedStats;
-use crate::zed::ZedStats;
-use std::path::PathBuf;
+use crate::unified::{Provider, UnifiedStats};
+use crate::zed::{ZedStats, get_zed_db_path, parse_zed_db};
 
 pub fn run_tui() -> io::Result<()> {
     let mut terminal = ratatui::init();
@@ -94,6 +102,10 @@ enum AppEvent {
     Terminal(Event),
     FileChanged,
     Tick,
+    ScanComplete {
+        cache: HashMap<PathBuf, (SystemTime, FileStats)>,
+        stats: Box<UnifiedStats>,
+    },
 }
 
 struct AppSettings {
@@ -177,15 +189,12 @@ impl ValueTracker {
 #[derive(Clone)]
 enum FileStats {
     Cline(ClineStats),
-    Claude(ClaudeStats),
-    Gemini(GeminiStats),
-    /// A single Gemini `tool-outputs/{write_file,replace}_N.txt` file. These
-    /// live outside the session JSONL and are the only source of Gemini
-    /// language data, so we parse them as their own cache entries.
-    GeminiLang(crate::languages::LanguageAnalyzer),
+    Claude(u64, ClaudeStats),
+    Gemini(u64, GeminiStats, String),
+    GeminiLang(LanguageAnalyzer),
     Zed(ZedStats),
     Copilot(CopilotStats),
-    Opencode(OpencodeStats),
+    Opencode(OpencodeStats, Box<OpencodeCacheState>),
     Antigravity(AntigravityStats),
 }
 
@@ -200,6 +209,8 @@ struct App {
     // Per-file results cache
     file_cache: HashMap<PathBuf, (SystemTime, FileStats)>,
     selected_model_idx: usize,
+    is_scanning: bool,
+    scan_pending: bool,
 }
 
 impl App {
@@ -214,16 +225,28 @@ impl App {
             tracker: RefCell::new(ValueTracker::default()),
             file_cache: HashMap::new(),
             selected_model_idx: 0,
+            is_scanning: false,
+            scan_pending: false,
         }
     }
 
-    fn smart_scan(&mut self) {
-        let cache = std::mem::take(&mut self.file_cache);
+    fn trigger_scan(&mut self, tx: &mpsc::Sender<AppEvent>) {
+        if self.is_scanning {
+            self.scan_pending = true;
+            return;
+        }
+        self.is_scanning = true;
+        self.scan_pending = false;
+        let cache = self.file_cache.clone();
         let progress = Arc::new(ScanProgress::default());
-        let (cache, stats) = run_scan_pass(cache, progress);
-        self.file_cache = cache;
-        self.stats = stats;
-        self.last_refresh = Instant::now();
+        let tx_scan = tx.clone();
+        std::thread::spawn(move || {
+            let (cache, stats) = run_scan_pass(cache, progress);
+            let _ = tx_scan.send(AppEvent::ScanComplete {
+                cache,
+                stats: Box::new(stats),
+            });
+        });
     }
 
     fn boot_with_splash(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
@@ -278,13 +301,23 @@ impl App {
         // 2. File Watcher
         let tx_file = tx.clone();
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if res.is_ok() {
-                let _ = tx_file.send(AppEvent::FileChanged);
+            if let Ok(ev) = res {
+                let is_relevant = ev.paths.iter().any(|p| {
+                    if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                        matches!(ext, "json" | "jsonl" | "db" | "db-wal" | "txt")
+                    } else {
+                        p.file_name()
+                            .is_some_and(|n| n == "conversations" || n == "chatSessions")
+                    }
+                });
+                if is_relevant {
+                    let _ = tx_file.send(AppEvent::FileChanged);
+                }
             }
         })
         .map_err(io::Error::other)?;
 
-        for provider in crate::unified::Provider::all() {
+        for provider in Provider::all() {
             if let Some(path) = provider.storage_path() {
                 if path.exists() {
                     let _ = watcher.watch(&path, RecursiveMode::Recursive);
@@ -310,86 +343,147 @@ impl App {
             was_animating = is_animating;
 
             match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(AppEvent::Terminal(ev)) => match ev {
-                    Event::Key(key) if key.kind == event::KeyEventKind::Press => match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
-                        KeyCode::Tab | KeyCode::Right => self.tab = self.tab.next(),
-                        KeyCode::BackTab | KeyCode::Left => self.tab = self.tab.prev(),
-                        KeyCode::Char(' ') if self.tab == Tab::Settings => {
-                            self.settings.heat_effects = !self.settings.heat_effects;
-                            terminal.draw(|f| self.draw(f))?;
-                        }
-                        KeyCode::Char('t') if self.tab == Tab::Settings => {
-                            self.settings.theme = self.settings.theme.next();
-                            terminal.draw(|f| self.draw(f))?;
-                        }
-                        KeyCode::Char(c @ ('1' | '2' | '3' | '4' | '5' | '6' | '7' | '8'))
-                            if matches!(
-                                self.tab,
-                                Tab::MonthlyCosts
-                                    | Tab::DailyCosts
-                                    | Tab::DailyTokens
-                                    | Tab::Languages
-                                    | Tab::Models
-                            ) =>
-                        {
-                            self.daily_filter = match c {
-                                '1' => DailyFilter::All,
-                                '2' => DailyFilter::Cline,
-                                '3' => DailyFilter::Claude,
-                                '4' => DailyFilter::Gemini,
-                                '5' => DailyFilter::Zed,
-                                '6' => DailyFilter::Copilot,
-                                '7' => DailyFilter::Opencode,
-                                '8' => DailyFilter::Antigravity,
-                                _ => self.daily_filter,
-                            };
-                            self.selected_model_idx = 0; // Reset index on filter change
-                            terminal.draw(|f| self.draw(f))?;
-                        }
-                        KeyCode::Up if self.tab == Tab::Models => {
-                            if self.selected_model_idx > 0 {
-                                self.selected_model_idx -= 1;
-                            }
-                            terminal.draw(|f| self.draw(f))?;
-                        }
-                        KeyCode::Down if self.tab == Tab::Models => {
-                            let max_len = match self.daily_filter {
-                                DailyFilter::All => self.stats.model_stats.len(),
-                                DailyFilter::Cline => self.stats.model_stats_cline.len(),
-                                DailyFilter::Claude => self.stats.model_stats_claude.len(),
-                                DailyFilter::Gemini => self.stats.model_stats_gemini.len(),
-                                DailyFilter::Zed => self.stats.model_stats_zed.len(),
-                                DailyFilter::Copilot => self.stats.model_stats_copilot.len(),
-                                DailyFilter::Opencode => self.stats.model_stats_opencode.len(),
-                                DailyFilter::Antigravity => {
-                                    self.stats.model_stats_antigravity.len()
-                                }
-                            };
-                            if max_len > 0 && self.selected_model_idx < max_len - 1 {
-                                self.selected_model_idx += 1;
-                            }
-                            terminal.draw(|f| self.draw(f))?;
-                        }
-                        KeyCode::Char('r') => {
-                            self.smart_scan();
-                            terminal.draw(|f| self.draw(f))?;
-                        }
-                        _ => {}
-                    },
-                    Event::Resize(_, _) => {
-                        terminal.draw(|f| self.draw(f))?;
+                Ok(first_event) => {
+                    let mut events = vec![first_event];
+                    while let Ok(ev) = rx.try_recv() {
+                        events.push(ev);
                     }
-                    _ => {}
-                },
-                Ok(AppEvent::FileChanged) => {
-                    needs_refresh = true;
-                }
-                Ok(AppEvent::Tick) | Err(mpsc::RecvTimeoutError::Timeout) => {
+
+                    let mut needs_draw = false;
+
+                    for event in events {
+                        match event {
+                            AppEvent::Terminal(ev) => match ev {
+                                Event::Key(key) if key.kind == event::KeyEventKind::Press => {
+                                    match key.code {
+                                        KeyCode::Char('q') | KeyCode::Esc => {
+                                            self.should_quit = true
+                                        }
+                                        KeyCode::Tab | KeyCode::Right => {
+                                            self.tab = self.tab.next();
+                                            needs_draw = true;
+                                        }
+                                        KeyCode::BackTab | KeyCode::Left => {
+                                            self.tab = self.tab.prev();
+                                            needs_draw = true;
+                                        }
+                                        KeyCode::Char(' ') if self.tab == Tab::Settings => {
+                                            self.settings.heat_effects =
+                                                !self.settings.heat_effects;
+                                            needs_draw = true;
+                                        }
+                                        KeyCode::Char('t') if self.tab == Tab::Settings => {
+                                            self.settings.theme = self.settings.theme.next();
+                                            needs_draw = true;
+                                        }
+                                        KeyCode::Char(
+                                            c @ ('1' | '2' | '3' | '4' | '5' | '6' | '7' | '8'),
+                                        ) if matches!(
+                                            self.tab,
+                                            Tab::MonthlyCosts
+                                                | Tab::DailyCosts
+                                                | Tab::DailyTokens
+                                                | Tab::Languages
+                                                | Tab::Models
+                                        ) =>
+                                        {
+                                            self.daily_filter = match c {
+                                                '1' => DailyFilter::All,
+                                                '2' => DailyFilter::Cline,
+                                                '3' => DailyFilter::Claude,
+                                                '4' => DailyFilter::Gemini,
+                                                '5' => DailyFilter::Zed,
+                                                '6' => DailyFilter::Copilot,
+                                                '7' => DailyFilter::Opencode,
+                                                '8' => DailyFilter::Antigravity,
+                                                _ => self.daily_filter,
+                                            };
+                                            self.selected_model_idx = 0;
+                                            needs_draw = true;
+                                        }
+                                        KeyCode::Up if self.tab == Tab::Models => {
+                                            if self.selected_model_idx > 0 {
+                                                self.selected_model_idx -= 1;
+                                            }
+                                            needs_draw = true;
+                                        }
+                                        KeyCode::Down if self.tab == Tab::Models => {
+                                            let max_len = match self.daily_filter {
+                                                DailyFilter::All => self.stats.model_stats.len(),
+                                                DailyFilter::Cline => {
+                                                    self.stats.model_stats_cline.len()
+                                                }
+                                                DailyFilter::Claude => {
+                                                    self.stats.model_stats_claude.len()
+                                                }
+                                                DailyFilter::Gemini => {
+                                                    self.stats.model_stats_gemini.len()
+                                                }
+                                                DailyFilter::Zed => {
+                                                    self.stats.model_stats_zed.len()
+                                                }
+                                                DailyFilter::Copilot => {
+                                                    self.stats.model_stats_copilot.len()
+                                                }
+                                                DailyFilter::Opencode => {
+                                                    self.stats.model_stats_opencode.len()
+                                                }
+                                                DailyFilter::Antigravity => {
+                                                    self.stats.model_stats_antigravity.len()
+                                                }
+                                            };
+                                            if max_len > 0 && self.selected_model_idx < max_len - 1
+                                            {
+                                                self.selected_model_idx += 1;
+                                            }
+                                            needs_draw = true;
+                                        }
+                                        KeyCode::Char('r') => {
+                                            self.trigger_scan(&tx);
+                                            needs_draw = true;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                Event::Resize(_, _) => {
+                                    needs_draw = true;
+                                }
+                                _ => {}
+                            },
+                            AppEvent::FileChanged => {
+                                needs_refresh = true;
+                            }
+                            AppEvent::ScanComplete { cache, stats } => {
+                                self.file_cache = cache;
+                                self.stats = *stats;
+                                self.last_refresh = Instant::now();
+                                self.is_scanning = false;
+                                if self.scan_pending {
+                                    self.trigger_scan(&tx);
+                                }
+                                needs_draw = true;
+                            }
+                            AppEvent::Tick => {}
+                        }
+                    }
+
                     if needs_refresh && self.last_refresh.elapsed() > debounce_duration {
-                        self.smart_scan();
+                        self.trigger_scan(&tx);
+                        needs_refresh = false;
+                        needs_draw = true;
+                    }
+
+                    if needs_draw {
+                        terminal.draw(|f| self.draw(f))?;
+                        last_tab = self.tab;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if needs_refresh && self.last_refresh.elapsed() > debounce_duration {
+                        self.trigger_scan(&tx);
                         needs_refresh = false;
                         terminal.draw(|f| self.draw(f))?;
+                        last_tab = self.tab;
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -450,6 +544,13 @@ impl App {
             footer_spans.push(Span::styled(
                 " [▲/▼] Scroll Models ",
                 Style::default().yellow(),
+            ));
+        }
+
+        if self.is_scanning {
+            footer_spans.push(Span::styled(
+                " [Scanning...] ",
+                Style::default().fg(TUI_YELLOW).add_modifier(Modifier::BOLD),
             ));
         }
 
@@ -1377,21 +1478,25 @@ impl App {
     }
 }
 
+fn get_file_mtime(path: &Path) -> SystemTime {
+    let mut mtime = fs::metadata(path)
+        .and_then(|m| m.modified())
+        .unwrap_or_else(|_| SystemTime::now());
+    let wal = path.with_extension("db-wal");
+    if let Ok(wal_meta) = fs::metadata(wal) {
+        if let Ok(wal_mtime) = wal_meta.modified() {
+            if wal_mtime > mtime {
+                mtime = wal_mtime;
+            }
+        }
+    }
+    mtime
+}
+
 fn run_scan_pass(
     mut cache: HashMap<PathBuf, (SystemTime, FileStats)>,
     progress: Arc<ScanProgress>,
 ) -> (HashMap<PathBuf, (SystemTime, FileStats)>, UnifiedStats) {
-    use crate::claude::{get_claude_files, parse_claude_file};
-    use crate::cline::{get_cline_files, parse_cline_file};
-    use crate::gemini::{
-        get_gemini_files, get_gemini_tool_output_files, parse_gemini_file,
-        parse_gemini_tool_output_file,
-    };
-    use crate::zed::{get_zed_db_path, parse_zed_db};
-    use rayon::prelude::*;
-    use std::collections::HashSet;
-    use std::fs;
-
     let start = Instant::now();
 
     let t = Instant::now();
@@ -1405,8 +1510,7 @@ fn run_scan_pass(
     let n_claude = claude_files.len();
 
     let t = Instant::now();
-    let gemini_files = get_gemini_files();
-    let gemini_lang_files = get_gemini_tool_output_files();
+    let (gemini_files, gemini_lang_files) = get_gemini_and_tool_output_files();
     let t_walk_gemini = t.elapsed();
     let n_gemini = gemini_files.len();
     let n_gemini_lang = gemini_lang_files.len();
@@ -1422,9 +1526,8 @@ fn run_scan_pass(
     let opencode_db_path = get_opencode_db_path();
     let n_opencode = if opencode_db_path.is_some() { 1 } else { 0 };
 
-    let antigravity_db_path =
-        get_antigravity_storage_path().map(|p| p.join("conversation_summaries.db"));
-    let n_antigravity = if antigravity_db_path.is_some() { 1 } else { 0 };
+    let antigravity_files = get_antigravity_files();
+    let n_antigravity = antigravity_files.len();
 
     progress.total.store(
         (n_cline
@@ -1444,6 +1547,7 @@ fn run_scan_pass(
         .chain(gemini_files.iter())
         .chain(gemini_lang_files.iter())
         .chain(copilot_files.iter())
+        .chain(antigravity_files.iter())
         .cloned()
         .collect();
 
@@ -1451,9 +1555,6 @@ fn run_scan_pass(
         all_paths.insert(p.clone());
     }
     if let Some(ref p) = opencode_db_path {
-        all_paths.insert(p.clone());
-    }
-    if let Some(ref p) = antigravity_db_path {
         all_paths.insert(p.clone());
     }
 
@@ -1491,7 +1592,7 @@ fn run_scan_pass(
     if let Some(p) = opencode_db_path {
         tasks.push((p, PType::Opencode));
     }
-    if let Some(p) = antigravity_db_path {
+    for p in antigravity_files {
         tasks.push((p, PType::Antigravity));
     }
 
@@ -1501,9 +1602,7 @@ fn run_scan_pass(
     let results: Vec<(PathBuf, SystemTime, FileStats, bool, u64)> = tasks
         .into_par_iter()
         .map(|(path, p_type)| {
-            let mtime = fs::metadata(&path)
-                .and_then(|m| m.modified())
-                .unwrap_or(SystemTime::now());
+            let mtime = get_file_mtime(&path);
             if let Some((cached_time, cached_stats)) = cache_ref.get(&path) {
                 if *cached_time == mtime {
                     progress_ref.done.fetch_add(1, Ordering::Relaxed);
@@ -1513,34 +1612,45 @@ fn run_scan_pass(
             let parse_start = Instant::now();
             let stats = match p_type {
                 PType::Cline => FileStats::Cline(parse_cline_file(&path, false, false)),
-                PType::Claude => FileStats::Claude(parse_claude_file(&path)),
-                PType::Gemini => FileStats::Gemini(parse_gemini_file(&path)),
+                PType::Claude => {
+                    let prev = match cache_ref.get(&path) {
+                        Some((_, FileStats::Claude(len, stats))) => Some((*len, stats)),
+                        _ => None,
+                    };
+                    let (new_len, stats) = parse_claude_file_incremental(&path, prev);
+                    FileStats::Claude(new_len, stats)
+                }
+                PType::Gemini => {
+                    let prev = match cache_ref.get(&path) {
+                        Some((_, FileStats::Gemini(len, stats, model))) => {
+                            Some((*len, stats, model.as_str()))
+                        }
+                        _ => None,
+                    };
+                    let (new_len, stats, model) = parse_gemini_file_incremental(&path, prev);
+                    FileStats::Gemini(new_len, stats, model)
+                }
                 PType::GeminiLang => FileStats::GeminiLang(parse_gemini_tool_output_file(&path)),
                 PType::Copilot => FileStats::Copilot(parse_copilot_file(&path)),
                 PType::Zed => {
-                    // parse_zed_db doesn't take a path currently but we can use it if we adapt it or just call it
-                    // For now, let's assume it works as it finds its own path, but we'll use the one we found.
                     if let Some(stats) = parse_zed_db() {
                         FileStats::Zed(stats)
                     } else {
-                        // Fallback/Empty
                         FileStats::Zed(ZedStats::default())
                     }
                 }
                 PType::Opencode => {
-                    if let Some(stats) = parse_opencode_db() {
-                        FileStats::Opencode(stats)
+                    let prev = match cache_ref.get(&path) {
+                        Some((_, FileStats::Opencode(_, state))) => Some(&**state),
+                        _ => None,
+                    };
+                    if let Some((stats, state)) = parse_opencode_db_incremental(&path, prev) {
+                        FileStats::Opencode(stats, Box::new(state))
                     } else {
-                        FileStats::Opencode(OpencodeStats::default())
+                        FileStats::Opencode(OpencodeStats::default(), Box::default())
                     }
                 }
-                PType::Antigravity => {
-                    if let Some(stats) = parse_antigravity_db() {
-                        FileStats::Antigravity(stats)
-                    } else {
-                        FileStats::Antigravity(AntigravityStats::default())
-                    }
-                }
+                PType::Antigravity => FileStats::Antigravity(parse_antigravity_file(&path)),
             };
             let parse_us = parse_start.elapsed().as_micros() as u64;
             progress_ref.done.fetch_add(1, Ordering::Relaxed);
@@ -1581,14 +1691,14 @@ fn run_scan_pass(
                         cline_us_max = parse_us;
                     }
                 }
-                FileStats::Claude(_) => {
+                FileStats::Claude(_, _) => {
                     claude_n += 1;
                     claude_us_sum += parse_us;
                     if parse_us > claude_us_max {
                         claude_us_max = parse_us;
                     }
                 }
-                FileStats::Gemini(_) | FileStats::GeminiLang(_) => {
+                FileStats::Gemini(_, _, _) | FileStats::GeminiLang(_) => {
                     gemini_n += 1;
                     gemini_us_sum += parse_us;
                     if parse_us > gemini_us_max {
@@ -1609,7 +1719,7 @@ fn run_scan_pass(
                         copilot_us_max = parse_us;
                     }
                 }
-                FileStats::Opencode(_) => {
+                FileStats::Opencode(_, _) => {
                     opencode_n += 1;
                     opencode_us_sum += parse_us;
                     if parse_us > opencode_us_max {
@@ -1637,12 +1747,12 @@ fn run_scan_pass(
         if let Some((_, stats)) = cache.get(path) {
             match stats {
                 FileStats::Cline(s) => new_stats.add_cline(s.clone(), 0.0),
-                FileStats::Claude(s) => new_stats.add_claude(s.clone(), 0.0),
-                FileStats::Gemini(s) => new_stats.add_gemini(s.clone(), 0.0),
+                FileStats::Claude(_, s) => new_stats.add_claude(s.clone(), 0.0),
+                FileStats::Gemini(_, s, _) => new_stats.add_gemini(s.clone(), 0.0),
                 FileStats::GeminiLang(langs) => new_stats.add_gemini_languages(langs),
                 FileStats::Zed(s) => new_stats.add_zed(s.clone(), 0.0),
                 FileStats::Copilot(s) => new_stats.add_copilot(s.clone(), 0.0),
-                FileStats::Opencode(s) => new_stats.add_opencode(s.clone(), 0.0),
+                FileStats::Opencode(s, _) => new_stats.add_opencode(s.clone(), 0.0),
                 FileStats::Antigravity(s) => new_stats.add_antigravity(s.clone(), 0.0),
             }
         }
@@ -1946,5 +2056,85 @@ mod tests {
             value, 1250,
             "High costs correctly default to standard cent scale (100.0)"
         );
+    }
+
+    #[test]
+    fn test_get_file_mtime_detects_wal() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let wal_path = dir.path().join("test.db-wal");
+
+        let mut f1 = fs::File::create(&db_path).unwrap();
+        writeln!(f1, "data").unwrap();
+        drop(f1);
+
+        // Sleep 15ms so wal has strictly newer timestamp
+        std::thread::sleep(Duration::from_millis(15));
+
+        let mut f2 = fs::File::create(&wal_path).unwrap();
+        writeln!(f2, "wal").unwrap();
+        drop(f2);
+
+        let mtime = get_file_mtime(&db_path);
+        let wal_mtime = fs::metadata(&wal_path).unwrap().modified().unwrap();
+        assert_eq!(mtime, wal_mtime);
+    }
+
+    #[test]
+    fn test_event_coalescing_burst() {
+        let (tx, rx) = mpsc::channel();
+        for _ in 0..500 {
+            tx.send(AppEvent::FileChanged).unwrap();
+        }
+
+        let mut needs_refresh = false;
+        let mut count = 0;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(ev, AppEvent::FileChanged) {
+                needs_refresh = true;
+                count += 1;
+            }
+        }
+        assert_eq!(count, 500);
+        assert!(needs_refresh);
+    }
+
+    #[test]
+    fn test_app_scan_flags_state_transitions() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new();
+
+        assert!(!app.is_scanning);
+        assert!(!app.scan_pending);
+
+        // Simulate scan in flight
+        app.is_scanning = true;
+        app.scan_pending = false;
+
+        // While scanning, another trigger marks scan_pending = true
+        app.trigger_scan(&tx);
+        assert!(app.is_scanning);
+        assert!(app.scan_pending);
+
+        // When ScanComplete arrives, state is updated
+        let cache = HashMap::new();
+        let stats = UnifiedStats::default();
+        tx.send(AppEvent::ScanComplete {
+            cache,
+            stats: Box::new(stats),
+        })
+        .unwrap();
+
+        let ev = rx.recv().unwrap();
+        match ev {
+            AppEvent::ScanComplete { cache, stats } => {
+                app.file_cache = cache;
+                app.stats = *stats;
+                app.is_scanning = false;
+                assert!(app.scan_pending);
+            }
+            _ => panic!("Expected ScanComplete"),
+        }
     }
 }

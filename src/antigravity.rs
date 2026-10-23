@@ -1,7 +1,7 @@
 use chrono::{DateTime, Local};
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::colors::*;
@@ -19,6 +19,29 @@ pub struct AntigravityStats {
     pub model_stats: HashMap<String, TokenStats>,
     pub sessions_found: usize,
     pub languages: crate::languages::LanguageAnalyzer,
+}
+
+impl AntigravityStats {
+    pub fn merge(&mut self, other: &AntigravityStats) {
+        self.sessions_found += other.sessions_found;
+        self.total_cost += other.total_cost;
+        for (k, v) in &other.daily_costs {
+            *self.daily_costs.entry(k.clone()).or_insert(0.0) += v;
+        }
+        for (k, v) in &other.monthly_costs {
+            *self.monthly_costs.entry(k.clone()).or_insert(0.0) += v;
+        }
+        for (k, v) in &other.daily_stats {
+            self.daily_stats.entry(k.clone()).or_default().add(v);
+        }
+        for (k, v) in &other.monthly_stats {
+            self.monthly_stats.entry(k.clone()).or_default().add(v);
+        }
+        for (k, v) in &other.model_stats {
+            self.model_stats.entry(k.clone()).or_default().add(v);
+        }
+        self.languages.merge(&other.languages);
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -175,6 +198,97 @@ fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
     None
 }
 
+pub fn get_antigravity_files() -> Vec<PathBuf> {
+    let base = match get_antigravity_storage_path() {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let conversations_dir = base.join("conversations");
+    if !conversations_dir.is_dir() {
+        return Vec::new();
+    }
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(conversations_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("db") {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+pub fn parse_antigravity_file(path: &Path) -> AntigravityStats {
+    let mut stats = AntigravityStats::default();
+
+    let date_key = std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .map(|sys_time| {
+            let dt: DateTime<Local> = sys_time.into();
+            dt.format("%Y-%m-%d").to_string()
+        })
+        .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
+
+    let month_key = if date_key.len() >= 7 {
+        date_key[..7].to_string()
+    } else {
+        "unknown".to_string()
+    };
+
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let Ok(session_conn) = Connection::open_with_flags(path, flags) else {
+        return stats;
+    };
+
+    stats.sessions_found = 1;
+
+    if let Ok(mut gen_stmt) = session_conn.prepare("SELECT data FROM gen_metadata") {
+        if let Ok(blobs) = gen_stmt.query_map([], |r| r.get::<_, Vec<u8>>(0)) {
+            for blob_res in blobs.flatten() {
+                if let Some(usage) = parse_cortex_generator_metadata(&blob_res) {
+                    let prices = get_pricing(&usage.model_id, usage.input_tokens);
+
+                    let cost = (usage.input_tokens as f64 / 1_000_000.0) * prices.input
+                        + (usage.output_tokens as f64 / 1_000_000.0) * prices.output
+                        + (usage.cached_tokens as f64 / 1_000_000.0) * prices.cache_read;
+
+                    stats.total_cost += cost;
+
+                    *stats.daily_costs.entry(date_key.clone()).or_insert(0.0) += cost;
+                    *stats.monthly_costs.entry(month_key.clone()).or_insert(0.0) += cost;
+
+                    let token_stat = TokenStats {
+                        in_tokens: usage.input_tokens,
+                        out_tokens: usage.output_tokens,
+                        cache_read_tokens: usage.cached_tokens,
+                        cache_create_tokens: 0,
+                    };
+
+                    stats
+                        .daily_stats
+                        .entry(date_key.clone())
+                        .or_default()
+                        .add(&token_stat);
+                    stats
+                        .monthly_stats
+                        .entry(month_key.clone())
+                        .or_default()
+                        .add(&token_stat);
+                    stats
+                        .model_stats
+                        .entry(usage.model_id)
+                        .or_default()
+                        .add(&token_stat);
+                }
+            }
+        }
+    }
+
+    stats
+}
+
 pub fn parse_antigravity_db() -> Option<AntigravityStats> {
     let base_path = get_antigravity_storage_path()?;
     parse_antigravity_db_from_path(base_path)
@@ -191,74 +305,11 @@ pub fn parse_antigravity_db_from_path(base_path: PathBuf) -> Option<AntigravityS
 
     for entry in entries.flatten() {
         let path = entry.path();
-
-        // Process only .db files
         if path.extension().and_then(|s| s.to_str()) != Some("db") {
             continue;
         }
-
-        // Get date from file modification metadata
-        let date_key = entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .map(|sys_time| {
-                let dt: DateTime<Local> = sys_time.into();
-                dt.format("%Y-%m-%d").to_string()
-            })
-            .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
-
-        let month_key = if date_key.len() >= 7 {
-            date_key[..7].to_string()
-        } else {
-            "unknown".to_string()
-        };
-
-        stats.sessions_found += 1;
-
-        if let Ok(session_conn) = Connection::open(&path) {
-            if let Ok(mut gen_stmt) = session_conn.prepare("SELECT data FROM gen_metadata") {
-                if let Ok(blobs) = gen_stmt.query_map([], |r| r.get::<_, Vec<u8>>(0)) {
-                    for blob_res in blobs.flatten() {
-                        if let Some(usage) = parse_cortex_generator_metadata(&blob_res) {
-                            let prices = get_pricing(&usage.model_id, usage.input_tokens);
-
-                            let cost = (usage.input_tokens as f64 / 1_000_000.0) * prices.input
-                                + (usage.output_tokens as f64 / 1_000_000.0) * prices.output
-                                + (usage.cached_tokens as f64 / 1_000_000.0) * prices.cache_read;
-
-                            stats.total_cost += cost;
-
-                            *stats.daily_costs.entry(date_key.clone()).or_insert(0.0) += cost;
-                            *stats.monthly_costs.entry(month_key.clone()).or_insert(0.0) += cost;
-
-                            let token_stat = TokenStats {
-                                in_tokens: usage.input_tokens,
-                                out_tokens: usage.output_tokens,
-                                cache_read_tokens: usage.cached_tokens,
-                                cache_create_tokens: 0,
-                            };
-
-                            stats
-                                .daily_stats
-                                .entry(date_key.clone())
-                                .or_default()
-                                .add(&token_stat);
-                            stats
-                                .monthly_stats
-                                .entry(month_key.clone())
-                                .or_default()
-                                .add(&token_stat);
-                            stats
-                                .model_stats
-                                .entry(usage.model_id)
-                                .or_default()
-                                .add(&token_stat);
-                        }
-                    }
-                }
-            }
-        }
+        let file_stats = parse_antigravity_file(&path);
+        stats.merge(&file_stats);
     }
 
     Some(stats)

@@ -174,71 +174,86 @@ pub fn parse_gemini_tool_output_file(
     analyzer
 }
 
-pub fn get_gemini_tool_output_files() -> Vec<PathBuf> {
-    let base = match get_gemini_storage_path() {
-        Some(p) => p,
-        None => return Vec::new(),
-    };
-    if !base.exists() {
-        return Vec::new();
-    }
-    WalkDir::new(&base)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            // require parent dir to be named "tool-outputs"
-            let in_tool_outputs = e
-                .path()
-                .parent()
-                .and_then(|p| p.file_name())
-                .is_some_and(|n| n == "tool-outputs");
-            in_tool_outputs && is_gemini_edit_tool_output(&e.file_name().to_string_lossy())
-        })
-        .map(|e| e.path().to_path_buf())
-        .collect()
+pub fn parse_gemini_file(file_path: &std::path::Path) -> GeminiStats {
+    parse_gemini_file_incremental(file_path, None).1
 }
 
-pub fn parse_gemini_file(file_path: &std::path::Path) -> GeminiStats {
-    let mut local = GeminiStats::default();
+pub fn parse_gemini_file_incremental(
+    file_path: &std::path::Path,
+    prev: Option<(u64, &GeminiStats, &str)>,
+) -> (u64, GeminiStats, String) {
+    use std::io::Seek;
+
+    let mut local = match prev {
+        Some((_, s, _)) => (*s).clone(),
+        None => GeminiStats::default(),
+    };
     let mut messages = Vec::new();
 
-    if file_path.to_string_lossy().ends_with(".jsonl") {
-        if let Ok(file) = fs::File::open(file_path) {
-            let reader = BufReader::new(file);
-            for l in reader.lines().map_while(Result::ok) {
-                if let Ok(msg) = serde_json::from_str::<GeminiMessage>(&l) {
-                    if msg.msg_type.is_some() && msg.timestamp.is_some() {
-                        messages.push(msg);
+    let mut file = match fs::File::open(file_path) {
+        Ok(f) => f,
+        Err(_) => return (0, local, "unknown".to_string()),
+    };
+    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+
+    let mut session_model = prev
+        .map(|(_, _, m)| m.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let is_jsonl = file_path.to_string_lossy().ends_with(".jsonl");
+
+    if is_jsonl {
+        let seek_pos = match prev {
+            Some((prev_len, _, _)) if file_len >= prev_len => prev_len,
+            _ => 0,
+        };
+
+        if seek_pos > 0 && seek_pos == file_len {
+            return (file_len, local, session_model);
+        }
+
+        if seek_pos > 0 {
+            if file.seek(std::io::SeekFrom::Start(seek_pos)).is_err() {
+                local = GeminiStats::default();
+                let _ = file.seek(std::io::SeekFrom::Start(0));
+            }
+        }
+
+        let reader = BufReader::new(file);
+        for l in reader.lines().map_while(Result::ok) {
+            if let Ok(msg) = serde_json::from_str::<GeminiMessage>(&l) {
+                if msg.msg_type.is_some() && msg.timestamp.is_some() {
+                    if session_model == "unknown" {
+                        if let Some(mod_id) = &msg.model {
+                            session_model = mod_id.clone();
+                        }
                     }
+                    messages.push(msg);
                 }
             }
         }
-    } else if let Ok(file) = fs::File::open(file_path) {
+    } else {
+        local = GeminiStats::default();
         let reader = BufReader::new(file);
         if let Ok(session) = serde_json::from_reader::<_, GeminiSession>(reader) {
             if let Some(msgs) = session.messages {
                 messages = msgs;
             }
         }
-    }
-
-    if messages.is_empty() {
-        return local;
-    }
-    local.sessions_found = 1;
-
-    let mut session_model = "unknown".to_string();
-    for m in &messages {
-        if let Some(mod_id) = &m.model {
-            session_model = mod_id.clone();
-            break;
+        for m in &messages {
+            if let Some(mod_id) = &m.model {
+                session_model = mod_id.clone();
+                break;
+            }
         }
     }
 
+    if messages.is_empty() {
+        return (file_len, local, session_model);
+    }
+    local.sessions_found = 1;
+
     for msg in messages {
-        // File edits are not recorded in session JSONL files — Gemini stores
-        // tool invocations as plain-text files under a sibling `tool-outputs/`
-        // directory. Those are walked separately in `run_gemini_report`.
         let msg_type = msg.msg_type.as_deref().unwrap_or("unknown");
         let msg_model = msg.model.clone().unwrap_or_else(|| session_model.clone());
 
@@ -322,31 +337,45 @@ pub fn parse_gemini_file(file_path: &std::path::Path) -> GeminiStats {
 
         local.total_messages += 1;
     }
-    local
+    (file_len, local, session_model)
 }
 
-pub fn get_gemini_files() -> Vec<PathBuf> {
+pub fn get_gemini_and_tool_output_files() -> (Vec<PathBuf>, Vec<PathBuf>) {
     let target_path = match get_gemini_storage_path() {
         Some(p) => p,
-        None => return Vec::new(),
+        None => return (Vec::new(), Vec::new()),
     };
     if !target_path.exists() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
-    WalkDir::new(&target_path)
+    let mut sessions = Vec::new();
+    let mut tool_outputs = Vec::new();
+
+    for entry in WalkDir::new(&target_path)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name().to_string_lossy().starts_with("session-")
-                && e.file_name().to_string_lossy().contains(".json")
-        })
-        .map(|e| e.path().to_path_buf())
-        .collect()
+    {
+        let file_name = entry.file_name().to_string_lossy();
+        if file_name.starts_with("session-") && file_name.contains(".json") {
+            sessions.push(entry.path().to_path_buf());
+        } else if is_gemini_edit_tool_output(&file_name) {
+            let in_tool_outputs = entry
+                .path()
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|n| n == "tool-outputs");
+            if in_tool_outputs {
+                tool_outputs.push(entry.path().to_path_buf());
+            }
+        }
+    }
+
+    (sessions, tool_outputs)
 }
 
 pub fn run_gemini_report() -> Option<(GeminiStats, f64)> {
     let start_time = Instant::now();
-    let session_files = get_gemini_files();
+    let (session_files, tool_output_files) = get_gemini_and_tool_output_files();
     if session_files.is_empty() {
         return None;
     }
@@ -358,7 +387,6 @@ pub fn run_gemini_report() -> Option<(GeminiStats, f64)> {
 
     // Walk sibling tool-outputs/ files to recover language data, which the
     // session JSONL does not carry.
-    let tool_output_files = get_gemini_tool_output_files();
     if !tool_output_files.is_empty() {
         let languages = tool_output_files
             .par_iter()
@@ -847,6 +875,44 @@ mod tests {
             (daily_cost - 0.00848115).abs() < 1e-9,
             "Cost {} was not close enough to 0.00848115",
             daily_cost
+        );
+    }
+
+    #[test]
+    fn test_gemini_incremental_append() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-inc.jsonl");
+
+        let msg1 = r#"{"id":1,"type":"gemini","model":"gemini-3.5-flash","timestamp":"2026-05-19T10:00:00Z","tokens":{"input":100,"output":50,"cached":20}}"#;
+        let msg2 = r#"{"id":2,"type":"gemini","timestamp":"2026-05-19T10:05:00Z","tokens":{"input":200,"output":100,"cached":0}}"#;
+
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "{}", msg1).unwrap();
+        drop(f);
+
+        let (len1, stats1, model1) = parse_gemini_file_incremental(&path, None);
+        assert_eq!(stats1.total_messages, 1);
+        assert_eq!(model1, "gemini-3.5-flash");
+
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(f, "{}", msg2).unwrap();
+        drop(f);
+
+        let (len2, stats2, model2) =
+            parse_gemini_file_incremental(&path, Some((len1, &stats1, &model1)));
+        assert!(len2 > len1);
+        assert_eq!(stats2.total_messages, 2);
+        assert_eq!(model2, "gemini-3.5-flash");
+
+        let cold_stats = parse_gemini_file(&path);
+        assert_eq!(cold_stats.total_messages, stats2.total_messages);
+        assert_eq!(
+            cold_stats.daily_stats.get("2026-05-19").unwrap().out_tokens,
+            stats2.daily_stats.get("2026-05-19").unwrap().out_tokens
         );
     }
 }
