@@ -155,19 +155,46 @@ fn extract_file_edits(
 }
 
 pub fn parse_claude_file(file_path: &std::path::Path) -> ClaudeStats {
-    let mut local = ClaudeStats::default();
-    let file = match fs::File::open(file_path) {
+    parse_claude_file_incremental(file_path, None).1
+}
+
+pub fn parse_claude_file_incremental(
+    file_path: &std::path::Path,
+    prev: Option<(u64, &ClaudeStats)>,
+) -> (u64, ClaudeStats) {
+    use std::io::Seek;
+
+    let mut file = match fs::File::open(file_path) {
         Ok(f) => f,
-        Err(_) => return local,
+        Err(_) => return (0, ClaudeStats::default()),
     };
-    local.sessions_found = 1;
+
+    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let (seek_pos, mut local) = match prev {
+        Some((prev_len, prev_stats)) if file_len >= prev_len => (prev_len, (*prev_stats).clone()),
+        _ => (
+            0,
+            ClaudeStats {
+                sessions_found: 1,
+                ..Default::default()
+            },
+        ),
+    };
+
+    if seek_pos > 0 && seek_pos == file_len {
+        return (file_len, local);
+    }
+
+    if seek_pos > 0 {
+        if file.seek(std::io::SeekFrom::Start(seek_pos)).is_err() {
+            local = ClaudeStats::default();
+            local.sessions_found = 1;
+            let _ = file.seek(std::io::SeekFrom::Start(0));
+        }
+    }
 
     let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
+    for line in reader.lines().map_while(Result::ok) {
         let entry = match serde_json::from_str::<ClaudeLogEntry>(&line) {
             Ok(e) => e,
             Err(_) => continue,
@@ -252,7 +279,7 @@ pub fn parse_claude_file(file_path: &std::path::Path) -> ClaudeStats {
 
         local.total_messages += 1;
     }
-    local
+    (file_len, local)
 }
 
 pub fn get_claude_files() -> Vec<PathBuf> {
@@ -771,5 +798,77 @@ mod tests {
         let day = stats.daily_stats.get("2026-05-19").unwrap();
         assert_eq!(day.in_tokens, 105);
         assert_eq!(day.out_tokens, 55);
+    }
+
+    #[test]
+    fn parse_claude_file_incremental_append_and_truncate() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session.jsonl");
+
+        let line1 = json!({
+            "type": "assistant",
+            "timestamp": "2026-05-19T10:00:00Z",
+            "message": {
+                "model": "claude-sonnet-4-6-20251001",
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+                "content": [{"type": "tool_use", "name": "Write", "input": {"file_path": "a.rs", "content": "12345"}}]
+            }
+        }).to_string();
+
+        let line2 = json!({
+            "type": "assistant",
+            "timestamp": "2026-05-19T10:05:00Z",
+            "message": {
+                "model": "claude-sonnet-4-6-20251001",
+                "usage": {"input_tokens": 200, "output_tokens": 80},
+                "content": [{"type": "tool_use", "name": "Write", "input": {"file_path": "b.py", "content": "123"}}]
+            }
+        }).to_string();
+
+        // 1. Initial write of line 1
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "{}", line1).unwrap();
+        drop(f);
+
+        let (len1, stats1) = parse_claude_file_incremental(&path, None);
+        assert_eq!(stats1.total_messages, 1);
+        let day1 = stats1.daily_stats.get("2026-05-19").unwrap();
+        assert_eq!(day1.in_tokens, 100);
+
+        // 2. Append line 2
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(f, "{}", line2).unwrap();
+        drop(f);
+
+        let (len2, stats2) = parse_claude_file_incremental(&path, Some((len1, &stats1)));
+        assert!(len2 > len1);
+        assert_eq!(stats2.total_messages, 2);
+        let day2 = stats2.daily_stats.get("2026-05-19").unwrap();
+        assert_eq!(day2.in_tokens, 300);
+        assert_eq!(day2.out_tokens, 130);
+        assert!(stats2.languages.stats.contains_key("Rust"));
+        assert!(stats2.languages.stats.contains_key("Python"));
+
+        // Must match a cold parse
+        let full_stats = parse_claude_file(&path);
+        assert_eq!(full_stats.total_messages, stats2.total_messages);
+        assert_eq!(
+            full_stats.daily_stats.get("2026-05-19").unwrap().in_tokens,
+            300
+        );
+
+        // 3. Truncate file and ensure it resets safely
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "{}", line2).unwrap();
+        drop(f);
+
+        let (len3, stats3) = parse_claude_file_incremental(&path, Some((len2, &stats2)));
+        assert_eq!(stats3.total_messages, 1);
+        assert_eq!(stats3.daily_stats.get("2026-05-19").unwrap().in_tokens, 200);
+        assert_eq!(len3, std::fs::metadata(&path).unwrap().len());
     }
 }

@@ -188,19 +188,8 @@ pub fn parse_cline_file(
 
                                 if let Some(p) = path {
                                     local.languages.record_file_edit(p, content_len);
-                                } else {
-                                    println!(
-                                        "DEBUG: Found tool {}, but no path! {:?}",
-                                        tool_name, val
-                                    );
                                 }
                             }
-                        } else {
-                            println!(
-                                "DEBUG: Failed to parse text as JSON for tool {}: {}",
-                                say,
-                                text.chars().take(50).collect::<String>()
-                            );
                         }
                     }
                 }
