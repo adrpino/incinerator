@@ -3,6 +3,7 @@ use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::colors::*;
@@ -149,6 +150,7 @@ pub fn parse_opencode_db_at(db_path: PathBuf) -> Option<OpencodeStats> {
     parse_opencode_connection(&conn)
 }
 
+#[allow(dead_code)]
 pub fn parse_opencode_db_incremental(
     db_path: &Path,
     prev: Option<&OpencodeCacheState>,
@@ -166,7 +168,144 @@ pub fn parse_opencode_connection_incremental(
     conn: &Connection,
     prev: Option<&OpencodeCacheState>,
 ) -> Option<(OpencodeStats, OpencodeCacheState)> {
-    parse_opencode_connection_with_path(conn, prev)
+    parse_opencode_connection_incremental_with_progress(conn, prev, None)
+}
+
+pub fn count_opencode_sessions(db_path: &Path) -> usize {
+    let Some(conn) = open_readonly_connection(db_path) else {
+        return 1;
+    };
+    count_opencode_sessions_conn(&conn)
+}
+
+pub fn count_opencode_sessions_conn(conn: &Connection) -> usize {
+    if let Ok(count) = conn.query_row("SELECT COUNT(*) FROM session", [], |r| r.get::<_, i64>(0)) {
+        if count > 0 {
+            return count as usize;
+        }
+    }
+    if let Ok(count) = conn.query_row("SELECT COUNT(DISTINCT session_id) FROM message", [], |r| {
+        r.get::<_, i64>(0)
+    }) {
+        if count > 0 {
+            return count as usize;
+        }
+    }
+    1
+}
+
+pub fn parse_opencode_db_incremental_with_progress(
+    db_path: &Path,
+    prev: Option<&OpencodeCacheState>,
+    progress: Option<(&AtomicU32, u32)>,
+) -> Option<(OpencodeStats, OpencodeCacheState)> {
+    let conn = open_readonly_connection(db_path)?;
+    parse_opencode_connection_incremental_with_progress(&conn, prev, progress)
+}
+
+pub fn parse_opencode_connection_incremental_with_progress(
+    conn: &Connection,
+    prev: Option<&OpencodeCacheState>,
+    progress: Option<(&AtomicU32, u32)>,
+) -> Option<(OpencodeStats, OpencodeCacheState)> {
+    parse_opencode_connection_with_path(conn, prev, progress)
+}
+
+struct OpencodeProgressTracker<'a> {
+    counter: Option<&'a AtomicU32>,
+    total_units: u32,
+    emitted_units: u32,
+    msg_start: i64,
+    msg_span: i64,
+    part_start: i64,
+    part_span: i64,
+}
+
+impl<'a> OpencodeProgressTracker<'a> {
+    fn new(
+        progress: Option<(&'a AtomicU32, u32)>,
+        msg_start: i64,
+        msg_end: i64,
+        part_start: i64,
+        part_end: i64,
+    ) -> Self {
+        let (counter, total_units) = match progress {
+            Some((c, t)) => (Some(c), t),
+            None => (None, 0),
+        };
+        Self {
+            counter,
+            total_units,
+            emitted_units: 0,
+            msg_start,
+            msg_span: (msg_end - msg_start).max(0),
+            part_start,
+            part_span: (part_end - part_start).max(0),
+        }
+    }
+
+    fn update_fraction(&mut self, frac: f64) {
+        let Some(counter) = self.counter else {
+            return;
+        };
+        if self.total_units == 0 {
+            return;
+        }
+        let clamped = frac.clamp(0.0, 1.0);
+        let max_in_flight = self.total_units.saturating_sub(1);
+        let target = ((clamped * self.total_units as f64).floor() as u32).min(max_in_flight);
+        if target > self.emitted_units {
+            let delta = target - self.emitted_units;
+            counter.fetch_add(delta, Ordering::Relaxed);
+            self.emitted_units = target;
+        }
+    }
+
+    fn on_message_rowid(&mut self, rowid: i64) {
+        if self.msg_span <= 0 {
+            return;
+        }
+        let msg_frac = ((rowid - self.msg_start) as f64 / self.msg_span as f64).clamp(0.0, 1.0);
+        let overall = if self.part_span > 0 {
+            msg_frac * 0.65
+        } else {
+            msg_frac
+        };
+        self.update_fraction(overall);
+    }
+
+    fn on_part_rowid(&mut self, rowid: i64) {
+        if self.part_span <= 0 {
+            return;
+        }
+        let part_frac = ((rowid - self.part_start) as f64 / self.part_span as f64).clamp(0.0, 1.0);
+        let overall = if self.msg_span > 0 {
+            0.65 + part_frac * 0.35
+        } else {
+            part_frac
+        };
+        self.update_fraction(overall);
+    }
+
+    fn on_fallback_session(&mut self) {
+        let Some(counter) = self.counter else {
+            return;
+        };
+        let max_in_flight = self.total_units.saturating_sub(1);
+        if self.emitted_units < max_in_flight {
+            counter.fetch_add(1, Ordering::Relaxed);
+            self.emitted_units += 1;
+        }
+    }
+
+    fn finish(&mut self) {
+        if let Some(counter) = self.counter {
+            if self.emitted_units < self.total_units {
+                counter.fetch_add(self.total_units - self.emitted_units, Ordering::Relaxed);
+                self.emitted_units = self.total_units;
+            }
+        }
+    }
 }
 
 fn scan_message_range(
@@ -175,13 +314,14 @@ fn scan_message_range(
     end_rowid: i64,
     stats: &mut OpencodeStats,
     unique_sessions: &mut HashSet<String>,
+    tracker: &mut OpencodeProgressTracker<'_>,
 ) -> bool {
     if end_rowid <= start_rowid {
         return true;
     }
 
     let Ok(mut stmt) = conn.prepare(
-        "SELECT session_id, data, time_created \
+        "SELECT rowid, session_id, data, time_created \
          FROM message \
          WHERE rowid > ?1 AND rowid <= ?2 \
            AND LENGTH(data) < 65536 \
@@ -192,16 +332,18 @@ fn scan_message_range(
 
     let Ok(rows) = stmt.query_map([start_rowid, end_rowid], |row| {
         Ok((
-            row.get::<_, Option<String>>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
         ))
     }) else {
         return false;
     };
 
     for row in rows.flatten() {
-        let (session_id, data_str, time_created) = row;
+        let (rowid, session_id, data_str, time_created) = row;
+        tracker.on_message_rowid(rowid);
         let Ok(msg) = serde_json::from_str::<OpencodeMessageData>(&data_str) else {
             continue;
         };
@@ -265,6 +407,7 @@ fn scan_part_range(
     start_rowid: i64,
     end_rowid: i64,
     languages: &mut LanguageAnalyzer,
+    tracker: &mut OpencodeProgressTracker<'_>,
 ) {
     if end_rowid <= start_rowid {
         return;
@@ -272,6 +415,7 @@ fn scan_part_range(
 
     let Ok(mut part_stmt) = conn.prepare(
         "SELECT \
+         rowid, \
          COALESCE( \
            json_extract(data, '$.path'), \
            json_extract(data, '$.file_path'), \
@@ -304,10 +448,16 @@ fn scan_part_range(
     };
 
     if let Ok(part_rows) = part_stmt.query_map([start_rowid, end_rowid], |row| {
-        Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?))
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
     }) {
         for row in part_rows.flatten() {
-            if let (Some(p), bytes) = row {
+            let (rowid, path_opt, bytes) = row;
+            tracker.on_part_rowid(rowid);
+            if let Some(p) = path_opt {
                 languages.record_file_edit(&p, bytes.max(0) as usize);
             }
         }
@@ -317,6 +467,7 @@ fn scan_part_range(
 fn parse_opencode_connection_with_path(
     conn: &Connection,
     prev: Option<&OpencodeCacheState>,
+    progress: Option<(&AtomicU32, u32)>,
 ) -> Option<(OpencodeStats, OpencodeCacheState)> {
     let max_msg_rowid_res: Result<i64, _> =
         conn.query_row("SELECT COALESCE(MAX(rowid), 0) FROM message", [], |r| {
@@ -338,6 +489,14 @@ fn parse_opencode_connection_with_path(
             _ => OpencodeCacheState::default(),
         };
 
+        let mut tracker = OpencodeProgressTracker::new(
+            progress,
+            cache_state.checkpoint_msg_rowid,
+            max_msg_rowid,
+            cache_state.checkpoint_part_rowid,
+            max_part_rowid,
+        );
+
         let target_msg_cp = max_msg_rowid.saturating_sub(MSG_TAIL_WINDOW);
         if target_msg_cp > cache_state.checkpoint_msg_rowid {
             let prev_cp = cache_state.checkpoint_msg_rowid;
@@ -347,6 +506,7 @@ fn parse_opencode_connection_with_path(
                 target_msg_cp,
                 &mut cache_state.checkpoint_stats,
                 &mut cache_state.checkpoint_sessions,
+                &mut tracker,
             );
             cache_state.checkpoint_msg_rowid = target_msg_cp;
         }
@@ -359,6 +519,7 @@ fn parse_opencode_connection_with_path(
                 prev_cp,
                 target_part_cp,
                 &mut cache_state.checkpoint_stats.languages,
+                &mut tracker,
             );
             cache_state.checkpoint_part_rowid = target_part_cp;
         }
@@ -373,6 +534,7 @@ fn parse_opencode_connection_with_path(
                 max_msg_rowid,
                 &mut live_stats,
                 &mut live_sessions,
+                &mut tracker,
             );
         }
         live_stats.sessions_found = live_sessions.len();
@@ -383,14 +545,17 @@ fn parse_opencode_connection_with_path(
                 cache_state.checkpoint_part_rowid,
                 max_part_rowid,
                 &mut live_stats.languages,
+                &mut tracker,
             );
         }
 
+        tracker.finish();
         return Some((live_stats, cache_state));
     }
 
     // Fallback to `session` table if `message` table is not present
     let mut stats = OpencodeStats::default();
+    let mut tracker = OpencodeProgressTracker::new(progress, 0, 0, 0, max_part_rowid);
     if let Ok(mut stmt) = conn.prepare(
         "SELECT model, cost, tokens_input, tokens_output, tokens_reasoning, \
          tokens_cache_read, tokens_cache_write, time_created FROM session",
@@ -408,6 +573,7 @@ fn parse_opencode_connection_with_path(
             ))
         }) {
             for row in rows.flatten() {
+                tracker.on_fallback_session();
                 let (
                     model_json,
                     cost,
@@ -456,9 +622,10 @@ fn parse_opencode_connection_with_path(
     }
 
     if max_part_rowid > 0 {
-        scan_part_range(conn, 0, max_part_rowid, &mut stats.languages);
+        scan_part_range(conn, 0, max_part_rowid, &mut stats.languages, &mut tracker);
     }
 
+    tracker.finish();
     Some((stats, OpencodeCacheState::default()))
 }
 
@@ -916,5 +1083,64 @@ mod tests {
                 .unwrap()
                 .total()
         );
+    }
+
+    #[test]
+    fn test_opencode_session_count_and_progress_tracking() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, time_created INTEGER)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, time_created INTEGER)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, data TEXT, time_created INTEGER)",
+            [],
+        )
+        .unwrap();
+
+        for i in 1..=5 {
+            conn.execute(
+                "INSERT INTO session (id, time_created) VALUES (?1, ?2)",
+                (format!("s-{}", i), 1781514498227i64),
+            )
+            .unwrap();
+            let msg = serde_json::json!({
+                "role": "assistant",
+                "modelID": "gemini-3.5-flash",
+                "cost": 0.01,
+                "tokens": { "input": 10, "output": 5 }
+            })
+            .to_string();
+            conn.execute(
+                "INSERT INTO message (id, session_id, data, time_created) VALUES (?1, ?2, ?3, ?4)",
+                (
+                    format!("m-{}", i),
+                    format!("s-{}", i),
+                    msg,
+                    1781514498227i64,
+                ),
+            )
+            .unwrap();
+        }
+
+        let session_count = count_opencode_sessions_conn(&conn);
+        assert_eq!(session_count, 5);
+
+        let progress = AtomicU32::new(0);
+        let (stats, _) = parse_opencode_connection_incremental_with_progress(
+            &conn,
+            None,
+            Some((&progress, session_count as u32)),
+        )
+        .unwrap();
+
+        assert_eq!(stats.sessions_found, 5);
+        assert_eq!(progress.load(Ordering::Relaxed), 5);
     }
 }

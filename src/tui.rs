@@ -33,7 +33,8 @@ use crate::gemini::{
 };
 use crate::languages::LanguageAnalyzer;
 use crate::opencode::{
-    OpencodeCacheState, OpencodeStats, get_opencode_db_path, parse_opencode_db_incremental,
+    OpencodeCacheState, OpencodeStats, count_opencode_sessions, get_opencode_db_path,
+    parse_opencode_db_incremental_with_progress,
 };
 use crate::pricing::get_pricing;
 use crate::unified::{Provider, UnifiedStats};
@@ -1524,7 +1525,10 @@ fn run_scan_pass(
     let n_zed = if zed_db_path.is_some() { 1 } else { 0 };
 
     let opencode_db_path = get_opencode_db_path();
-    let n_opencode = if opencode_db_path.is_some() { 1 } else { 0 };
+    let n_opencode = opencode_db_path
+        .as_deref()
+        .map(count_opencode_sessions)
+        .unwrap_or(0);
 
     let antigravity_files = get_antigravity_files();
     let n_antigravity = antigravity_files.len();
@@ -1605,7 +1609,11 @@ fn run_scan_pass(
             let mtime = get_file_mtime(&path);
             if let Some((cached_time, cached_stats)) = cache_ref.get(&path) {
                 if *cached_time == mtime {
-                    progress_ref.done.fetch_add(1, Ordering::Relaxed);
+                    let weight = match p_type {
+                        PType::Opencode => n_opencode as u32,
+                        _ => 1,
+                    };
+                    progress_ref.done.fetch_add(weight, Ordering::Relaxed);
                     return (path, mtime, cached_stats.clone(), false, 0);
                 }
             }
@@ -1644,16 +1652,25 @@ fn run_scan_pass(
                         Some((_, FileStats::Opencode(_, state))) => Some(&**state),
                         _ => None,
                     };
-                    if let Some((stats, state)) = parse_opencode_db_incremental(&path, prev) {
+                    if let Some((stats, state)) = parse_opencode_db_incremental_with_progress(
+                        &path,
+                        prev,
+                        Some((&progress_ref.done, n_opencode as u32)),
+                    ) {
                         FileStats::Opencode(stats, Box::new(state))
                     } else {
+                        progress_ref
+                            .done
+                            .fetch_add(n_opencode as u32, Ordering::Relaxed);
                         FileStats::Opencode(OpencodeStats::default(), Box::default())
                     }
                 }
                 PType::Antigravity => FileStats::Antigravity(parse_antigravity_file(&path)),
             };
             let parse_us = parse_start.elapsed().as_micros() as u64;
-            progress_ref.done.fetch_add(1, Ordering::Relaxed);
+            if !matches!(p_type, PType::Opencode) {
+                progress_ref.done.fetch_add(1, Ordering::Relaxed);
+            }
             (path, mtime, stats, true, parse_us)
         })
         .collect();
