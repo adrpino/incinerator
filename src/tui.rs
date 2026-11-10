@@ -20,6 +20,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::antigravity::{AntigravityStats, get_antigravity_files, parse_antigravity_file};
 use crate::claude::{ClaudeStats, get_claude_files, parse_claude_file_incremental};
 use crate::cline::{ClineStats, get_cline_files, parse_cline_file};
+use crate::codex::{CodexCacheState, CodexStats, get_codex_files, parse_codex_file_incremental};
 use crate::colors::{
     TUI_CYAN, TUI_DARK_GRAY, TUI_FLAME_ORANGE_1, TUI_FLAME_ORANGE_2, TUI_FLAME_RED_1,
     TUI_FLAME_YELLOW_2, TUI_ORANGE_601, TUI_RED, TUI_WHITE, TUI_YELLOW, ThemeType,
@@ -133,6 +134,7 @@ enum DailyFilter {
     Copilot,
     Opencode,
     Antigravity,
+    Codex,
 }
 
 impl DailyFilter {
@@ -146,6 +148,7 @@ impl DailyFilter {
             DailyFilter::Copilot => "Copilot",
             DailyFilter::Opencode => "Opencode",
             DailyFilter::Antigravity => "Antigravity",
+            DailyFilter::Codex => "Codex",
         }
     }
 }
@@ -197,6 +200,7 @@ enum FileStats {
     Copilot(CopilotStats),
     Opencode(OpencodeStats, Box<OpencodeCacheState>),
     Antigravity(AntigravityStats),
+    Codex(CodexCacheState, CodexStats),
 }
 
 struct App {
@@ -378,7 +382,8 @@ impl App {
                                             needs_draw = true;
                                         }
                                         KeyCode::Char(
-                                            c @ ('1' | '2' | '3' | '4' | '5' | '6' | '7' | '8'),
+                                            c @ ('1' | '2' | '3' | '4' | '5' | '6' | '7' | '8'
+                                            | '9'),
                                         ) if matches!(
                                             self.tab,
                                             Tab::MonthlyCosts
@@ -397,6 +402,7 @@ impl App {
                                                 '6' => DailyFilter::Copilot,
                                                 '7' => DailyFilter::Opencode,
                                                 '8' => DailyFilter::Antigravity,
+                                                '9' => DailyFilter::Codex,
                                                 _ => self.daily_filter,
                                             };
                                             self.selected_model_idx = 0;
@@ -431,6 +437,9 @@ impl App {
                                                 }
                                                 DailyFilter::Antigravity => {
                                                     self.stats.model_stats_antigravity.len()
+                                                }
+                                                DailyFilter::Codex => {
+                                                    self.stats.model_stats_codex.len()
                                                 }
                                             };
                                             if max_len > 0 && self.selected_model_idx < max_len - 1
@@ -755,6 +764,7 @@ impl App {
             (DailyFilter::Copilot, "6"),
             (DailyFilter::Opencode, "7"),
             (DailyFilter::Antigravity, "8"),
+            (DailyFilter::Codex, "9"),
         ];
         let mut chip_spans: Vec<Span> = vec![Span::styled(" Filter: ", Style::default().dim())];
         let palette = self.settings.theme.palette();
@@ -795,6 +805,7 @@ impl App {
             DailyFilter::Copilot => &self.stats.monthly_costs_copilot,
             DailyFilter::Opencode => &self.stats.monthly_costs_opencode,
             DailyFilter::Antigravity => &self.stats.monthly_costs_antigravity,
+            DailyFilter::Codex => &self.stats.monthly_costs_codex,
         };
 
         let title = format!(" Monthly Burn (USD) — {} ", self.daily_filter.label());
@@ -819,6 +830,7 @@ impl App {
             DailyFilter::Copilot => &self.stats.daily_costs_copilot,
             DailyFilter::Opencode => &self.stats.daily_costs_opencode,
             DailyFilter::Antigravity => &self.stats.daily_costs_antigravity,
+            DailyFilter::Codex => &self.stats.daily_costs_codex,
         };
 
         let title = format!(" Daily Burn (USD) — {} ", self.daily_filter.label());
@@ -936,6 +948,7 @@ impl App {
             DailyFilter::Copilot => &self.stats.daily_tokens_copilot,
             DailyFilter::Opencode => &self.stats.daily_tokens_opencode,
             DailyFilter::Antigravity => &self.stats.daily_tokens_antigravity,
+            DailyFilter::Codex => &self.stats.daily_tokens_codex,
         };
 
         let mut sorted_days: Vec<_> = source.iter().collect();
@@ -1042,6 +1055,7 @@ impl App {
             DailyFilter::Copilot => &self.stats.languages_copilot,
             DailyFilter::Opencode => &self.stats.languages_opencode,
             DailyFilter::Antigravity => &self.stats.languages_antigravity,
+            DailyFilter::Codex => &self.stats.languages_codex,
         };
 
         let mut sorted_langs: Vec<_> = analyzer.stats.iter().collect();
@@ -1107,6 +1121,7 @@ impl App {
             DailyFilter::Copilot => &self.stats.model_stats_copilot,
             DailyFilter::Opencode => &self.stats.model_stats_opencode,
             DailyFilter::Antigravity => &self.stats.model_stats_antigravity,
+            DailyFilter::Codex => &self.stats.model_stats_codex,
         };
 
         let mut model_list: Vec<(String, crate::viz::TokenStats, f64)> = models_map
@@ -1261,12 +1276,18 @@ impl App {
                 "Claude Code (Anthropic)"
             } else if name.contains("gemini") || name.contains("argon") {
                 "Gemini CLI (Google)"
+            } else if name.contains("glm-") || name.contains("z-ai") || name.contains("zai") {
+                "Z.ai (GLM)"
             } else if name.contains("gpt-")
                 || name.contains("astra")
                 || name.contains("sol")
+                || name.contains("terra")
                 || name.contains("luna")
             {
-                "OpenAI (via Cline/Zed)"
+                match self.daily_filter {
+                    DailyFilter::Codex => "Codex (OpenAI)",
+                    _ => "OpenAI (via Cline/Zed)",
+                }
             } else if name.contains("deepseek") {
                 "DeepSeek"
             } else {
@@ -1278,6 +1299,7 @@ impl App {
                     DailyFilter::Copilot => "Copilot",
                     DailyFilter::Opencode => "Opencode",
                     DailyFilter::Antigravity => "Antigravity",
+                    DailyFilter::Codex => "Codex",
                     DailyFilter::All => "AI Assistant",
                 }
             };
@@ -1533,6 +1555,9 @@ fn run_scan_pass(
     let antigravity_files = get_antigravity_files();
     let n_antigravity = antigravity_files.len();
 
+    let codex_files = get_codex_files();
+    let n_codex = codex_files.len();
+
     progress.total.store(
         (n_cline
             + n_claude
@@ -1541,7 +1566,8 @@ fn run_scan_pass(
             + n_zed
             + n_copilot
             + n_opencode
-            + n_antigravity) as u32,
+            + n_antigravity
+            + n_codex) as u32,
         Ordering::Relaxed,
     );
 
@@ -1552,6 +1578,7 @@ fn run_scan_pass(
         .chain(gemini_lang_files.iter())
         .chain(copilot_files.iter())
         .chain(antigravity_files.iter())
+        .chain(codex_files.iter())
         .cloned()
         .collect();
 
@@ -1573,6 +1600,7 @@ fn run_scan_pass(
         Copilot,
         Opencode,
         Antigravity,
+        Codex,
     }
     let mut tasks = Vec::new();
     for p in cline_files {
@@ -1598,6 +1626,9 @@ fn run_scan_pass(
     }
     for p in antigravity_files {
         tasks.push((p, PType::Antigravity));
+    }
+    for p in codex_files {
+        tasks.push((p, PType::Codex));
     }
 
     let t_parse_start = Instant::now();
@@ -1666,6 +1697,14 @@ fn run_scan_pass(
                     }
                 }
                 PType::Antigravity => FileStats::Antigravity(parse_antigravity_file(&path)),
+                PType::Codex => {
+                    let prev = match cache_ref.get(&path) {
+                        Some((_, FileStats::Codex(state, stats))) => Some((state, stats)),
+                        _ => None,
+                    };
+                    let (new_state, stats) = parse_codex_file_incremental(&path, prev);
+                    FileStats::Codex(new_state, stats)
+                }
             };
             let parse_us = parse_start.elapsed().as_micros() as u64;
             if !matches!(p_type, PType::Opencode) {
@@ -1697,6 +1736,9 @@ fn run_scan_pass(
     let mut antigravity_n = 0u32;
     let mut antigravity_us_sum: u64 = 0;
     let mut antigravity_us_max: u64 = 0;
+    let mut codex_n = 0u32;
+    let mut codex_us_sum: u64 = 0;
+    let mut codex_us_max: u64 = 0;
     for (path, mtime, stats, was_parsed, parse_us) in results {
         if was_parsed {
             files_parsed += 1;
@@ -1750,6 +1792,13 @@ fn run_scan_pass(
                         antigravity_us_max = parse_us;
                     }
                 }
+                FileStats::Codex(_, _) => {
+                    codex_n += 1;
+                    codex_us_sum += parse_us;
+                    if parse_us > codex_us_max {
+                        codex_us_max = parse_us;
+                    }
+                }
             }
         }
         cache.insert(path, (mtime, stats));
@@ -1771,6 +1820,7 @@ fn run_scan_pass(
                 FileStats::Copilot(s) => new_stats.add_copilot(s.clone(), 0.0),
                 FileStats::Opencode(s, _) => new_stats.add_opencode(s.clone(), 0.0),
                 FileStats::Antigravity(s) => new_stats.add_antigravity(s.clone(), 0.0),
+                FileStats::Codex(_, s) => new_stats.add_codex(s.clone(), 0.0),
             }
         }
     }
@@ -1793,7 +1843,7 @@ fn run_scan_pass(
             let cache_hits = cache_size.saturating_sub(files_parsed as usize);
             let _ = writeln!(
                 f,
-                "[{}] mode={} walk_cline={}ms walk_claude={}ms walk_gemini={}ms walk_copilot={}ms parse={}ms [cline n={} sum={}ms max={}ms | claude n={} sum={}ms max={}ms | gemini n={} sum={}ms max={}ms | zed n={} sum={}ms max={}ms | copilot n={} sum={}ms max={}ms | opencode n={} sum={}ms max={}ms | antigravity n={} sum={}ms max={}ms] agg={}ms total={}ms parsed={} cache_hits={} cache_size={}",
+                "[{}] mode={} walk_cline={}ms walk_claude={}ms walk_gemini={}ms walk_copilot={}ms parse={}ms [cline n={} sum={}ms max={}ms | claude n={} sum={}ms max={}ms | gemini n={} sum={}ms max={}ms | zed n={} sum={}ms max={}ms | copilot n={} sum={}ms max={}ms | opencode n={} sum={}ms max={}ms | antigravity n={} sum={}ms max={}ms | codex n={} sum={}ms max={}ms] agg={}ms total={}ms parsed={} cache_hits={} cache_size={}",
                 now,
                 if cfg!(debug_assertions) {
                     "debug"
@@ -1826,6 +1876,9 @@ fn run_scan_pass(
                 antigravity_n,
                 antigravity_us_sum / 1000,
                 antigravity_us_max / 1000,
+                codex_n,
+                codex_us_sum / 1000,
+                codex_us_max / 1000,
                 t_agg.as_millis(),
                 start.elapsed().as_millis(),
                 files_parsed,
@@ -2023,6 +2076,7 @@ mod tests {
         assert_eq!(DailyFilter::Copilot.label(), "Copilot");
         assert_eq!(DailyFilter::Opencode.label(), "Opencode");
         assert_eq!(DailyFilter::Antigravity.label(), "Antigravity");
+        assert_eq!(DailyFilter::Codex.label(), "Codex");
     }
 
     #[test]

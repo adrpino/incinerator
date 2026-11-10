@@ -138,7 +138,7 @@ pub fn get_gemini_pricing(model: &str, input_count: i64) -> ModelPricing {
         } else {
             (4.00, 20.00, 0.20)
         }
-    } else if m.contains("gemini-3.7-flash") {
+    } else if m.contains("gemini-3.8-flash") || m.contains("gemini-3.7-flash") {
         if chrono::Local::now().year() <= 2026 {
             (0.75, 3.75, 0.075)
         } else {
@@ -229,12 +229,23 @@ pub fn get_openai_pricing(model: &str) -> ModelPricing {
             cache_write: 6.25,
             cache_read: 0.50,
         }
-    } else if m.contains("gpt-5.6-terra") {
+    } else if m.contains("gpt-5.6-terra") || m.contains("gpt-5-6-terra") {
         ModelPricing {
             input: 2.00,
             output: 12.00,
             cache_write: 2.50,
             cache_read: 0.20,
+        }
+    } else if m.contains("gpt-6.1-terra")
+        || m.contains("gpt-6-1-terra")
+        || m.contains("gpt-6-terra")
+        || m.contains("terra")
+    {
+        ModelPricing {
+            input: 1.00,
+            output: 5.00,
+            cache_write: 1.25,
+            cache_read: 0.05,
         }
     } else if m.contains("gpt-5.6-luna") {
         ModelPricing {
@@ -375,12 +386,56 @@ pub fn get_openai_pricing(model: &str) -> ModelPricing {
 
 pub fn get_glm_pricing(model: &str) -> ModelPricing {
     let m = model.to_lowercase();
-    if m.contains("glm-5.2") {
+    if m.contains("glm-5.3-flashx") || m.contains("glm-5-3-flashx") {
+        ModelPricing {
+            input: 0.37,
+            output: 1.25,
+            cache_write: 0.0,
+            cache_read: 0.075,
+        }
+    } else if m.contains("glm-5.3-flash") || m.contains("glm-5-3-flash") {
+        ModelPricing {
+            input: 0.15,
+            output: 0.50,
+            cache_write: 0.0,
+            cache_read: 0.03,
+        }
+    } else if m.contains("glm-5.3-fast")
+        || m.contains("glm-5.3-prime")
+        || m.contains("glm-5.3:fast")
+    {
+        ModelPricing {
+            input: 2.80,
+            output: 8.80,
+            cache_write: 0.0,
+            cache_read: 0.56,
+        }
+    } else if m.contains("glm-5.3")
+        || m.contains("glm-5-3")
+        || m.contains("glm-5.2")
+        || m.contains("glm-5-2")
+        || m.contains("glm-5.1")
+        || m.contains("glm-5-1")
+    {
         ModelPricing {
             input: 1.40,
             output: 4.40,
             cache_write: 0.0,
             cache_read: 0.26,
+        }
+    } else if m.contains("glm-5-turbo") || m.contains("glm-5v-turbo") {
+        ModelPricing {
+            input: 1.20,
+            output: 4.00,
+            cache_write: 0.0,
+            cache_read: 0.24,
+        }
+    } else if m.contains("glm-5") {
+        ModelPricing {
+            input: 1.00,
+            output: 3.20,
+            cache_write: 0.0,
+            cache_read: 0.20,
         }
     } else {
         ModelPricing::default()
@@ -437,10 +492,11 @@ pub fn get_pricing(model: &str, input_count: i64) -> ModelPricing {
         || m.contains("o4")
         || m.contains("astra")
         || m.contains("sol")
+        || m.contains("terra")
         || m.contains("luna")
     {
         get_openai_pricing(model)
-    } else if m.contains("glm-") {
+    } else if m.contains("glm-") || m.contains("z-ai/") || m.contains("zai") {
         get_glm_pricing(model)
     } else if m.contains("kimi") {
         get_kimi_pricing(model)
@@ -467,6 +523,7 @@ pub fn get_pricing(model: &str, input_count: i64) -> ModelPricing {
             || m.contains("gpt")
             || m.contains("astra")
             || m.contains("sol")
+            || m.contains("terra")
             || m.contains("luna")
         {
             return p;
@@ -670,6 +727,34 @@ mod tests {
         assert_eq!(p.cache_read, 0.26);
         assert_eq!(p.cache_write, 0.0);
 
+        let p = get_glm_pricing("z-ai/glm-5.3");
+        assert_eq!(p.input, 1.40);
+        assert_eq!(p.output, 4.40);
+        assert_eq!(p.cache_read, 0.26);
+        assert_eq!(p.cache_write, 0.0);
+
+        let p = get_glm_pricing("z-ai/glm-5.3-flash");
+        assert_eq!(p.input, 0.15);
+        assert_eq!(p.output, 0.50);
+        assert_eq!(p.cache_read, 0.03);
+        assert_eq!(p.cache_write, 0.0);
+
+        let p = get_glm_pricing("z-ai/glm-5.3-flashx");
+        assert_eq!(p.input, 0.37);
+        assert_eq!(p.output, 1.25);
+        assert_eq!(p.cache_read, 0.075);
+        assert_eq!(p.cache_write, 0.0);
+
+        let p = get_pricing("z-ai/glm-5.3-flash", 0);
+        assert_eq!(p.input, 0.15);
+        assert_eq!(p.output, 0.50);
+        assert_eq!(p.cache_read, 0.03);
+
+        let p = get_pricing("z-ai/glm-5.3-flashx", 0);
+        assert_eq!(p.input, 0.37);
+        assert_eq!(p.output, 1.25);
+        assert_eq!(p.cache_read, 0.075);
+
         let p = get_glm_pricing("unknown");
         assert_eq!(p.input, 0.0);
     }
@@ -735,12 +820,24 @@ mod tests {
         assert_eq!(p.cache_write, 12.50);
         assert_eq!(p.cache_read, 1.00);
 
-        // GPT-6.1 Sol
+        // GPT-6.1 Sol & Terra
         let p = get_openai_pricing("gpt-6.1-sol");
         assert_eq!(p.input, 2.00);
         assert_eq!(p.output, 10.00);
         assert_eq!(p.cache_write, 2.50);
         assert_eq!(p.cache_read, 0.10);
+
+        let p = get_pricing("global.openai.gpt-6.1-sol", 0);
+        assert_eq!(p.input, 2.00);
+        assert_eq!(p.output, 10.00);
+        assert_eq!(p.cache_write, 2.50);
+        assert_eq!(p.cache_read, 0.10);
+
+        let p = get_pricing("global.openai.gpt-6.1-terra", 0);
+        assert_eq!(p.input, 1.00);
+        assert_eq!(p.output, 5.00);
+        assert_eq!(p.cache_write, 1.25);
+        assert_eq!(p.cache_read, 0.05);
 
         // GPT-6 Sol
         let p = get_openai_pricing("gpt-6-sol");
@@ -1194,7 +1291,19 @@ mod tests {
         assert_eq!(p.cache_read, 0.025);
         assert_eq!(p.cache_write, 0.0);
 
-        // 3.7 Flash
+        // 3.8 Flash & 3.7 Flash
+        let p = get_gemini_pricing("gemini-3.8-flash", 0);
+        if chrono::Local::now().year() <= 2026 {
+            assert_eq!(p.input, 0.75);
+            assert_eq!(p.output, 3.75);
+            assert_eq!(p.cache_read, 0.075);
+        } else {
+            assert_eq!(p.input, 1.50);
+            assert_eq!(p.output, 7.50);
+            assert_eq!(p.cache_read, 0.15);
+        }
+        assert_eq!(p.cache_write, 0.0);
+
         let p = get_gemini_pricing("gemini-3.7-flash", 0);
         if chrono::Local::now().year() <= 2026 {
             assert_eq!(p.input, 0.75);

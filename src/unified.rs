@@ -4,10 +4,12 @@ use std::path::PathBuf;
 use crate::antigravity::{AntigravityStats, get_antigravity_storage_path, run_antigravity_report};
 use crate::claude::{ClaudeStats, get_claude_storage_path, run_claude_report};
 use crate::cline::{ClineStats, get_cline_storage_path, run_cline_report};
+use crate::codex::{CodexStats, get_codex_storage_path, run_codex_report};
 use crate::colors::*;
 use crate::copilot::{CopilotStats, get_copilot_storage_path, run_copilot_report};
 use crate::format::{format_float_with_commas, format_int_with_commas};
 use crate::gemini::{GeminiStats, get_gemini_storage_path, run_gemini_report};
+use crate::languages::LanguageAnalyzer;
 use crate::opencode::{OpencodeStats, get_opencode_db_path, run_opencode_report};
 use crate::viz::TokenStats;
 use crate::zed::{ZedStats, get_zed_db_path, run_zed_report};
@@ -21,6 +23,7 @@ pub enum Provider {
     Copilot,
     Opencode,
     Antigravity,
+    Codex,
 }
 
 impl std::fmt::Display for Provider {
@@ -33,6 +36,7 @@ impl std::fmt::Display for Provider {
             Provider::Copilot => write!(f, "Copilot"),
             Provider::Opencode => write!(f, "Opencode"),
             Provider::Antigravity => write!(f, "Antigravity"),
+            Provider::Codex => write!(f, "Codex"),
         }
     }
 }
@@ -47,6 +51,7 @@ impl Provider {
             Provider::Copilot,
             Provider::Opencode,
             Provider::Antigravity,
+            Provider::Codex,
         ]
     }
 
@@ -59,6 +64,7 @@ impl Provider {
             Provider::Copilot => get_copilot_storage_path(),
             Provider::Opencode => get_opencode_db_path(),
             Provider::Antigravity => get_antigravity_storage_path(),
+            Provider::Codex => get_codex_storage_path(),
         }
     }
 }
@@ -73,6 +79,7 @@ pub struct UnifiedStats {
     pub daily_costs_copilot: BTreeMap<String, f64>,
     pub daily_costs_opencode: BTreeMap<String, f64>,
     pub daily_costs_antigravity: BTreeMap<String, f64>,
+    pub daily_costs_codex: BTreeMap<String, f64>,
     pub daily_tokens: BTreeMap<String, TokenStats>,
     pub daily_tokens_cline: BTreeMap<String, TokenStats>,
     pub daily_tokens_claude: BTreeMap<String, TokenStats>,
@@ -81,6 +88,7 @@ pub struct UnifiedStats {
     pub daily_tokens_copilot: BTreeMap<String, TokenStats>,
     pub daily_tokens_opencode: BTreeMap<String, TokenStats>,
     pub daily_tokens_antigravity: BTreeMap<String, TokenStats>,
+    pub daily_tokens_codex: BTreeMap<String, TokenStats>,
     pub monthly_costs: BTreeMap<String, f64>,
     pub monthly_costs_cline: BTreeMap<String, f64>,
     pub monthly_costs_claude: BTreeMap<String, f64>,
@@ -89,6 +97,7 @@ pub struct UnifiedStats {
     pub monthly_costs_copilot: BTreeMap<String, f64>,
     pub monthly_costs_opencode: BTreeMap<String, f64>,
     pub monthly_costs_antigravity: BTreeMap<String, f64>,
+    pub monthly_costs_codex: BTreeMap<String, f64>,
     pub monthly_tokens: BTreeMap<String, TokenStats>,
     pub model_stats: HashMap<String, TokenStats>,
     pub model_stats_cline: HashMap<String, TokenStats>,
@@ -98,6 +107,7 @@ pub struct UnifiedStats {
     pub model_stats_copilot: HashMap<String, TokenStats>,
     pub model_stats_opencode: HashMap<String, TokenStats>,
     pub model_stats_antigravity: HashMap<String, TokenStats>,
+    pub model_stats_codex: HashMap<String, TokenStats>,
     pub provider_costs: HashMap<Provider, f64>,
     pub total_tokens: TokenStats,
     pub total_cost: f64,
@@ -105,14 +115,15 @@ pub struct UnifiedStats {
     pub files_parsed: u32,
     pub files_last_parsed: u32,
     pub show_cache_create: bool,
-    pub languages: crate::languages::LanguageAnalyzer,
-    pub languages_cline: crate::languages::LanguageAnalyzer,
-    pub languages_claude: crate::languages::LanguageAnalyzer,
-    pub languages_gemini: crate::languages::LanguageAnalyzer,
-    pub languages_zed: crate::languages::LanguageAnalyzer,
-    pub languages_copilot: crate::languages::LanguageAnalyzer,
-    pub languages_opencode: crate::languages::LanguageAnalyzer,
-    pub languages_antigravity: crate::languages::LanguageAnalyzer,
+    pub languages: LanguageAnalyzer,
+    pub languages_cline: LanguageAnalyzer,
+    pub languages_claude: LanguageAnalyzer,
+    pub languages_gemini: LanguageAnalyzer,
+    pub languages_zed: LanguageAnalyzer,
+    pub languages_copilot: LanguageAnalyzer,
+    pub languages_opencode: LanguageAnalyzer,
+    pub languages_antigravity: LanguageAnalyzer,
+    pub languages_codex: LanguageAnalyzer,
 }
 
 impl UnifiedStats {
@@ -124,6 +135,7 @@ impl UnifiedStats {
         let copilot_res = run_copilot_report();
         let opencode_res = run_opencode_report();
         let antigravity_res = run_antigravity_report();
+        let codex_res = run_codex_report();
 
         if cline_res.is_none()
             && gemini_res.is_none()
@@ -132,6 +144,7 @@ impl UnifiedStats {
             && copilot_res.is_none()
             && opencode_res.is_none()
             && antigravity_res.is_none()
+            && codex_res.is_none()
         {
             return None;
         }
@@ -157,6 +170,9 @@ impl UnifiedStats {
         }
         if let Some((s, t)) = antigravity_res {
             unified.add_antigravity(s, t);
+        }
+        if let Some((s, t)) = codex_res {
+            unified.add_codex(s, t);
         }
         Some(unified)
     }
@@ -463,6 +479,43 @@ impl UnifiedStats {
         self.languages_antigravity.merge(&s.languages);
     }
 
+    pub fn add_codex(&mut self, s: CodexStats, parse_time: f64) {
+        self.merge_costs(&s.daily_costs, &s.monthly_costs);
+        for (k, v) in &s.daily_costs {
+            *self.daily_costs_codex.entry(k.clone()).or_insert(0.0) += v;
+        }
+        for (k, v) in &s.monthly_costs {
+            *self.monthly_costs_codex.entry(k.clone()).or_insert(0.0) += v;
+        }
+        self.merge_daily_tokens(&s.daily_stats);
+        for (k, v) in &s.daily_stats {
+            self.daily_tokens_codex.entry(k.clone()).or_default().add(v);
+        }
+        *self.provider_costs.entry(Provider::Codex).or_insert(0.0) += s.total_cost;
+        self.merge_monthly_tokens(&s.monthly_stats);
+        for (model, v) in &s.model_stats {
+            self.model_stats_codex
+                .entry(model.clone())
+                .or_default()
+                .add(v);
+        }
+        self.merge_model_stats(s.model_stats.clone());
+
+        let mut total = TokenStats::default();
+        for v in s.model_stats.values() {
+            total.add(v);
+        }
+        self.total_tokens.add(&total);
+        self.total_cost += s.total_cost;
+        self.parse_time += parse_time;
+        self.files_parsed += s.sessions_found as u32;
+        self.languages.merge(&s.languages);
+        self.languages_codex.merge(&s.languages);
+        if total.cache_create_tokens > 0 {
+            self.show_cache_create = true;
+        }
+    }
+
     pub fn pad_missing_dates(&mut self) {
         use chrono::{Datelike, Duration, NaiveDate};
 
@@ -484,6 +537,10 @@ impl UnifiedStats {
                 self.daily_costs_zed.entry(key.clone()).or_insert(0.0);
                 self.daily_costs_copilot.entry(key.clone()).or_insert(0.0);
                 self.daily_costs_opencode.entry(key.clone()).or_insert(0.0);
+                self.daily_costs_antigravity
+                    .entry(key.clone())
+                    .or_insert(0.0);
+                self.daily_costs_codex.entry(key.clone()).or_insert(0.0);
                 self.daily_tokens.entry(key.clone()).or_default();
                 self.daily_tokens_cline.entry(key.clone()).or_default();
                 self.daily_tokens_claude.entry(key.clone()).or_default();
@@ -491,6 +548,10 @@ impl UnifiedStats {
                 self.daily_tokens_zed.entry(key.clone()).or_default();
                 self.daily_tokens_copilot.entry(key.clone()).or_default();
                 self.daily_tokens_opencode.entry(key.clone()).or_default();
+                self.daily_tokens_antigravity
+                    .entry(key.clone())
+                    .or_default();
+                self.daily_tokens_codex.entry(key.clone()).or_default();
                 if let Some(next) = curr.checked_add_signed(Duration::try_days(1).unwrap()) {
                     curr = next;
                 } else {
@@ -522,6 +583,10 @@ impl UnifiedStats {
                 self.monthly_costs_opencode
                     .entry(key.clone())
                     .or_insert(0.0);
+                self.monthly_costs_antigravity
+                    .entry(key.clone())
+                    .or_insert(0.0);
+                self.monthly_costs_codex.entry(key.clone()).or_insert(0.0);
                 self.monthly_tokens.entry(key.clone()).or_default();
 
                 // Move to first day of next month
@@ -1089,7 +1154,8 @@ mod tests {
         assert!(all_providers.contains(&Provider::Copilot));
         assert!(all_providers.contains(&Provider::Opencode));
         assert!(all_providers.contains(&Provider::Antigravity));
+        assert!(all_providers.contains(&Provider::Codex));
 
-        assert_eq!(all_providers.len(), 7);
+        assert_eq!(all_providers.len(), 8);
     }
 }
