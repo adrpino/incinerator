@@ -3,6 +3,7 @@
 mod antigravity;
 mod claude;
 mod cline;
+mod codex;
 mod colors;
 mod copilot;
 mod eco;
@@ -87,6 +88,12 @@ enum Commands {
         #[arg(long)]
         daily: Option<usize>,
     },
+    /// Analyze OpenAI Codex CLI session logs (~/.codex/sessions)
+    Codex {
+        /// Number of days to show in the daily costs chart
+        #[arg(long)]
+        daily: Option<usize>,
+    },
     /// Launch interactive TUI (default when no command given)
     Tui,
 }
@@ -145,6 +152,12 @@ fn main() {
             let days = daily.unwrap_or(default_daily);
             if let Some((stats, time)) = antigravity::run_antigravity_report() {
                 antigravity::print_antigravity_report(&stats, time, days);
+            }
+        }
+        Some(Commands::Codex { daily }) => {
+            let days = daily.unwrap_or(default_daily);
+            if let Some((stats, time)) = codex::run_codex_report() {
+                codex::print_codex_report(&stats, time, days);
             }
         }
         Some(Commands::Tui) => {
