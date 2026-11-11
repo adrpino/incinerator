@@ -131,58 +131,59 @@ pub fn get_claude_pricing(model: &str) -> ModelPricing {
 
 pub fn get_gemini_pricing(model: &str, input_count: i64) -> ModelPricing {
     let m = model.to_lowercase();
-    let (input, output, cache) = if m.contains("gemini-4") || m.contains("argon") {
-        let now = chrono::Local::now();
-        if now.year() < 2026 || (now.year() == 2026 && now.month() <= 11) {
-            (2.00, 10.00, 0.10)
-        } else {
-            (4.00, 20.00, 0.20)
-        }
-    } else if m.contains("gemini-3.8-flash") || m.contains("gemini-3.7-flash") {
-        if chrono::Local::now().year() <= 2026 {
-            (0.75, 3.75, 0.075)
-        } else {
+    let (input, output, cache) =
+        if m.contains("gemini-4") || m.contains("argon") || m.contains("carbon") {
+            let now = chrono::Local::now();
+            if now.year() < 2026 || (now.year() == 2026 && now.month() <= 11) {
+                (2.00, 10.00, 0.10)
+            } else {
+                (4.00, 20.00, 0.20)
+            }
+        } else if m.contains("gemini-3.8-flash") || m.contains("gemini-3.7-flash") {
+            if chrono::Local::now().year() <= 2026 {
+                (0.75, 3.75, 0.075)
+            } else {
+                (1.50, 7.50, 0.15)
+            }
+        } else if m.contains("gemini-3.1-flash-lite") {
+            (0.25, 1.50, 0.025)
+        } else if m.contains("gemini-3-pro") || m.contains("gemini-3.1-pro") {
+            if input_count <= 200_000 {
+                (2.00, 12.00, 0.20)
+            } else {
+                (4.00, 18.00, 0.40)
+            }
+        } else if m.contains("gemini-3-flash") {
+            (0.50, 3.00, 0.05)
+        } else if m.contains("gemini-3.6-flash") {
             (1.50, 7.50, 0.15)
-        }
-    } else if m.contains("gemini-3.1-flash-lite") {
-        (0.25, 1.50, 0.025)
-    } else if m.contains("gemini-3-pro") || m.contains("gemini-3.1-pro") {
-        if input_count <= 200_000 {
-            (2.00, 12.00, 0.20)
+        } else if m.contains("gemini-3.5-flash") {
+            (1.50, 9.00, 0.15)
+        } else if m.contains("gemini-2.5-pro") {
+            if input_count <= 200_000 {
+                (1.25, 10.00, 0.125)
+            } else {
+                (2.50, 15.00, 0.25)
+            }
+        } else if m.contains("gemini-2.5-flash") {
+            (0.30, 2.50, 0.03)
+        } else if m.contains("gemini-2.0-flash") {
+            (0.10, 0.40, 0.025)
+        } else if m.contains("gemini-1.5-pro") {
+            if input_count <= 128_000 {
+                (1.25, 5.00, 0.3125)
+            } else {
+                (2.50, 10.00, 0.625)
+            }
+        } else if m.contains("gemini-1.5-flash") {
+            if input_count <= 128_000 {
+                (0.075, 0.30, 0.01875)
+            } else {
+                (0.15, 0.60, 0.0375)
+            }
         } else {
-            (4.00, 18.00, 0.40)
-        }
-    } else if m.contains("gemini-3-flash") {
-        (0.50, 3.00, 0.05)
-    } else if m.contains("gemini-3.6-flash") {
-        (1.50, 7.50, 0.15)
-    } else if m.contains("gemini-3.5-flash") {
-        (1.50, 9.00, 0.15)
-    } else if m.contains("gemini-2.5-pro") {
-        if input_count <= 200_000 {
-            (1.25, 10.00, 0.125)
-        } else {
-            (2.50, 15.00, 0.25)
-        }
-    } else if m.contains("gemini-2.5-flash") {
-        (0.30, 2.50, 0.03)
-    } else if m.contains("gemini-2.0-flash") {
-        (0.10, 0.40, 0.025)
-    } else if m.contains("gemini-1.5-pro") {
-        if input_count <= 128_000 {
-            (1.25, 5.00, 0.3125)
-        } else {
-            (2.50, 10.00, 0.625)
-        }
-    } else if m.contains("gemini-1.5-flash") {
-        if input_count <= 128_000 {
-            (0.075, 0.30, 0.01875)
-        } else {
-            (0.15, 0.60, 0.0375)
-        }
-    } else {
-        (1.00, 4.00, 0.10)
-    };
+            (1.00, 4.00, 0.10)
+        };
 
     ModelPricing {
         input,
@@ -482,7 +483,7 @@ pub fn get_pricing(model: &str, input_count: i64) -> ModelPricing {
         || m.contains("mythos")
     {
         get_claude_pricing(model)
-    } else if m.contains("gemini") || m.contains("argon") {
+    } else if m.contains("gemini") || m.contains("argon") || m.contains("carbon") {
         get_gemini_pricing(model, input_count)
     } else if m.contains("deepseek") {
         get_deepseek_pricing(model)
@@ -515,7 +516,7 @@ pub fn get_pricing(model: &str, input_count: i64) -> ModelPricing {
             return p;
         }
         let p = get_gemini_pricing(model, input_count);
-        if p.input != 1.0 || m.contains("gemini") || m.contains("argon") {
+        if p.input != 1.0 || m.contains("gemini") || m.contains("argon") || m.contains("carbon") {
             return p;
         }
         let p = get_openai_pricing(model);
@@ -596,19 +597,26 @@ mod tests {
         assert_eq!(p.output, 4.00);
         assert_eq!(p.cache_read, 0.19);
 
-        // Gemini 4 Argon
-        let p = get_pricing("gemini-4-argon", 0);
-        let now = chrono::Local::now();
-        if now.year() < 2026 || (now.year() == 2026 && now.month() <= 11) {
-            assert_eq!(p.input, 2.00);
-            assert_eq!(p.output, 10.00);
-            assert_eq!(p.cache_read, 0.10);
-        } else {
-            assert_eq!(p.input, 4.00);
-            assert_eq!(p.output, 20.00);
-            assert_eq!(p.cache_read, 0.20);
+        // Gemini 4 Argon & Carbon
+        for model in &[
+            "gemini-4-argon",
+            "gemini-4-carbon",
+            "google/gemini-4-carbon",
+            "carbon",
+        ] {
+            let p = get_pricing(model, 300_000);
+            let now = chrono::Local::now();
+            if now.year() < 2026 || (now.year() == 2026 && now.month() <= 11) {
+                assert_eq!(p.input, 2.00, "Failed for {}", model);
+                assert_eq!(p.output, 10.00, "Failed for {}", model);
+                assert_eq!(p.cache_read, 0.10, "Failed for {}", model);
+            } else {
+                assert_eq!(p.input, 4.00, "Failed for {}", model);
+                assert_eq!(p.output, 20.00, "Failed for {}", model);
+                assert_eq!(p.cache_read, 0.20, "Failed for {}", model);
+            }
+            assert_eq!(p.cache_write, 0.0, "Failed for {}", model);
         }
-        assert_eq!(p.cache_write, 0.0);
 
         // OpenAI Astra, Sol, Luna
         let p = get_pricing("gpt-6-astra", 0);
@@ -1214,6 +1222,9 @@ mod tests {
             get_pricing("gemini-4-argon", 0);
             get_pricing("google/gemini-4-argon", 0);
             get_pricing("argon", 0);
+            get_pricing("gemini-4-carbon", 0);
+            get_pricing("google/gemini-4-carbon", 0);
+            get_pricing("carbon", 0);
             get_pricing("gpt-6-astra", 0);
             get_pricing("gpt-6.1-sol", 0);
             get_pricing("gpt-6-sol", 0);
@@ -1282,6 +1293,26 @@ mod tests {
             assert_eq!(p.input, 4.00);
             assert_eq!(p.output, 20.00);
             assert_eq!(p.cache_read, 0.20);
+        }
+
+        // Gemini 4 Carbon (flat across <=200k and >200k context)
+        for &(model, ctx) in &[
+            ("gemini-4-carbon", 0),
+            ("gemini-4-carbon", 500_000),
+            ("google/gemini-4-carbon", 0),
+            ("carbon", 0),
+        ] {
+            let p = get_gemini_pricing(model, ctx);
+            if now.year() < 2026 || (now.year() == 2026 && now.month() <= 11) {
+                assert_eq!(p.input, 2.00, "Failed for {} @ {}", model, ctx);
+                assert_eq!(p.output, 10.00, "Failed for {} @ {}", model, ctx);
+                assert_eq!(p.cache_read, 0.10, "Failed for {} @ {}", model, ctx);
+            } else {
+                assert_eq!(p.input, 4.00, "Failed for {} @ {}", model, ctx);
+                assert_eq!(p.output, 20.00, "Failed for {} @ {}", model, ctx);
+                assert_eq!(p.cache_read, 0.20, "Failed for {} @ {}", model, ctx);
+            }
+            assert_eq!(p.cache_write, 0.0, "Failed for {} @ {}", model, ctx);
         }
 
         // Flash Lite

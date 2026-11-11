@@ -1,7 +1,7 @@
 use chrono::{DateTime, Local};
 use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -9,10 +9,13 @@ use std::time::{Duration, Instant};
 use crate::colors::*;
 use crate::format::{format_float_with_commas, format_int_with_commas};
 use crate::languages::LanguageAnalyzer;
+use crate::pricing::get_pricing;
 use crate::viz::{TokenStats, print_cost_bar, print_token_bar};
 
 const MSG_TAIL_WINDOW: i64 = 64;
 const PART_TAIL_WINDOW: i64 = 128;
+const MAX_PENDING_MESSAGES: usize = 64;
+const PENDING_MESSAGE_TTL_MS: i64 = 6 * 60 * 60 * 1000;
 
 #[derive(Default, Clone)]
 pub struct OpencodeStats {
@@ -32,6 +35,7 @@ pub struct OpencodeCacheState {
     pub checkpoint_part_rowid: i64,
     pub checkpoint_sessions: HashSet<String>,
     pub checkpoint_stats: OpencodeStats,
+    pub pending_msg_rowids: BTreeSet<i64>,
 }
 
 #[allow(dead_code)]
@@ -97,6 +101,14 @@ impl OpencodeModelField {
     }
 }
 
+#[derive(Deserialize, Default)]
+struct OpencodeMessageTime {
+    #[serde(default)]
+    created: Option<i64>,
+    #[serde(default)]
+    completed: Option<i64>,
+}
+
 #[derive(Deserialize)]
 struct OpencodeMessageData {
     #[serde(default)]
@@ -107,6 +119,12 @@ struct OpencodeMessageData {
     cost: Option<f64>,
     #[serde(default)]
     tokens: Option<OpencodeTokens>,
+    #[serde(default)]
+    time: Option<OpencodeMessageTime>,
+    #[serde(default)]
+    finish: Option<String>,
+    #[serde(default)]
+    error: Option<serde_json::Value>,
 }
 
 pub fn get_opencode_db_path() -> Option<PathBuf> {
@@ -308,6 +326,191 @@ impl<'a> OpencodeProgressTracker<'a> {
     }
 }
 
+struct InFlightMessage {
+    rowid: i64,
+    msg: OpencodeMessageData,
+    session_id: Option<String>,
+    time_created: i64,
+}
+
+struct PendingCheckpointCtx<'a> {
+    pending_rowids: &'a mut BTreeSet<i64>,
+    in_flight: &'a mut Vec<InFlightMessage>,
+    latest_time_ms: i64,
+}
+
+fn is_message_in_flight(msg: &OpencodeMessageData, time_created: i64, latest_time_ms: i64) -> bool {
+    let created_ms = msg.time.as_ref().and_then(|t| t.created).unwrap_or(0);
+    if created_ms <= 0 {
+        return false;
+    }
+    let is_completed = msg.time.as_ref().and_then(|t| t.completed).is_some()
+        || msg.finish.is_some()
+        || msg.error.is_some();
+    if is_completed {
+        return false;
+    }
+    let ref_created = if time_created > 0 {
+        time_created
+    } else {
+        created_ms
+    };
+    latest_time_ms.saturating_sub(ref_created) <= PENDING_MESSAGE_TTL_MS
+}
+
+fn compute_opencode_cost(
+    recorded_cost: Option<f64>,
+    model_name: &str,
+    tokens_in: i64,
+    tokens_out_total: i64,
+    cache_read: i64,
+    cache_write: i64,
+) -> f64 {
+    if let Some(c) = recorded_cost {
+        if c > 0.0 {
+            return c;
+        }
+    }
+    let has_tokens = tokens_in > 0 || tokens_out_total > 0 || cache_read > 0 || cache_write > 0;
+    if !has_tokens || model_name == "unknown" || model_name.to_ascii_lowercase().contains("ollama")
+    {
+        return 0.0;
+    }
+    let pricing = get_pricing(model_name, tokens_in);
+    (tokens_in as f64 * pricing.input
+        + tokens_out_total as f64 * pricing.output
+        + cache_read as f64 * pricing.cache_read
+        + cache_write as f64 * pricing.cache_write)
+        / 1_000_000.0
+}
+
+fn record_assistant_message(
+    msg: OpencodeMessageData,
+    session_id: Option<String>,
+    time_created: i64,
+    stats: &mut OpencodeStats,
+    unique_sessions: &mut HashSet<String>,
+) {
+    if let Some(sid) = session_id {
+        unique_sessions.insert(sid);
+    }
+
+    let tokens = msg.tokens.unwrap_or_default();
+    let tokens_in = tokens.input.unwrap_or(0);
+    let tokens_out = tokens.output.unwrap_or(0);
+    let tokens_reasoning = tokens.reasoning.unwrap_or(0);
+    let out_total = tokens_out + tokens_reasoning;
+    let cache = tokens.cache.unwrap_or_default();
+    let cache_read = cache.read.unwrap_or(0);
+    let cache_write = cache.write.unwrap_or(0);
+
+    let model_name = msg
+        .model_id
+        .map(OpencodeModelField::into_model_name)
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let cost = compute_opencode_cost(
+        msg.cost,
+        &model_name,
+        tokens_in,
+        out_total,
+        cache_read,
+        cache_write,
+    );
+
+    let dt = DateTime::from_timestamp(
+        time_created / 1000,
+        ((time_created % 1000) * 1_000_000) as u32,
+    )
+    .map(|dt| dt.with_timezone(&Local))
+    .unwrap_or_else(Local::now);
+
+    let date_key = dt.format("%Y-%m-%d").to_string();
+    let month_key = dt.format("%Y-%m").to_string();
+
+    *stats.daily_costs.entry(date_key.clone()).or_insert(0.0) += cost;
+    *stats.monthly_costs.entry(month_key.clone()).or_insert(0.0) += cost;
+    stats.total_cost += cost;
+
+    let entry = TokenStats {
+        in_tokens: tokens_in,
+        out_tokens: out_total,
+        cache_read_tokens: cache_read,
+        cache_create_tokens: cache_write,
+    };
+
+    stats.daily_stats.entry(date_key).or_default().add(&entry);
+    stats
+        .monthly_stats
+        .entry(month_key)
+        .or_default()
+        .add(&entry);
+    stats.model_stats.entry(model_name).or_default().add(&entry);
+}
+
+fn resolve_pending_messages(
+    conn: &Connection,
+    cache_state: &mut OpencodeCacheState,
+    in_flight: &mut Vec<InFlightMessage>,
+    latest_time_ms: i64,
+) {
+    if cache_state.pending_msg_rowids.is_empty() {
+        return;
+    }
+
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT session_id, data, time_created \
+         FROM message \
+         WHERE rowid = ?1 AND LENGTH(data) < 65536",
+    ) else {
+        return;
+    };
+
+    let rowids: Vec<i64> = cache_state.pending_msg_rowids.iter().copied().collect();
+    for rowid in rowids {
+        let row_res = stmt.query_row([rowid], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        });
+
+        let Ok((session_id, data_str, time_created)) = row_res else {
+            cache_state.pending_msg_rowids.remove(&rowid);
+            continue;
+        };
+
+        let Ok(msg) = serde_json::from_str::<OpencodeMessageData>(&data_str) else {
+            cache_state.pending_msg_rowids.remove(&rowid);
+            continue;
+        };
+
+        if msg.role.as_deref() != Some("assistant") {
+            cache_state.pending_msg_rowids.remove(&rowid);
+            continue;
+        }
+
+        if is_message_in_flight(&msg, time_created, latest_time_ms) {
+            in_flight.push(InFlightMessage {
+                rowid,
+                msg,
+                session_id,
+                time_created,
+            });
+        } else {
+            cache_state.pending_msg_rowids.remove(&rowid);
+            record_assistant_message(
+                msg,
+                session_id,
+                time_created,
+                &mut cache_state.checkpoint_stats,
+                &mut cache_state.checkpoint_sessions,
+            );
+        }
+    }
+}
+
 fn scan_message_range(
     conn: &Connection,
     start_rowid: i64,
@@ -315,6 +518,7 @@ fn scan_message_range(
     stats: &mut OpencodeStats,
     unique_sessions: &mut HashSet<String>,
     tracker: &mut OpencodeProgressTracker<'_>,
+    mut pending_ctx: Option<PendingCheckpointCtx<'_>>,
 ) -> bool {
     if end_rowid <= start_rowid {
         return true;
@@ -351,52 +555,20 @@ fn scan_message_range(
             continue;
         }
 
-        if let Some(sid) = session_id {
-            unique_sessions.insert(sid);
+        if let Some(ref mut ctx) = pending_ctx {
+            if is_message_in_flight(&msg, time_created, ctx.latest_time_ms) {
+                ctx.pending_rowids.insert(rowid);
+                ctx.in_flight.push(InFlightMessage {
+                    rowid,
+                    msg,
+                    session_id,
+                    time_created,
+                });
+                continue;
+            }
         }
 
-        let cost = msg.cost.unwrap_or(0.0);
-        let tokens = msg.tokens.unwrap_or_default();
-        let tokens_in = tokens.input.unwrap_or(0);
-        let tokens_out = tokens.output.unwrap_or(0);
-        let tokens_reasoning = tokens.reasoning.unwrap_or(0);
-        let cache = tokens.cache.unwrap_or_default();
-        let cache_read = cache.read.unwrap_or(0);
-        let cache_write = cache.write.unwrap_or(0);
-
-        let model_name = msg
-            .model_id
-            .map(OpencodeModelField::into_model_name)
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let dt = DateTime::from_timestamp(
-            time_created / 1000,
-            ((time_created % 1000) * 1_000_000) as u32,
-        )
-        .map(|dt| dt.with_timezone(&Local))
-        .unwrap_or_else(Local::now);
-
-        let date_key = dt.format("%Y-%m-%d").to_string();
-        let month_key = dt.format("%Y-%m").to_string();
-
-        *stats.daily_costs.entry(date_key.clone()).or_insert(0.0) += cost;
-        *stats.monthly_costs.entry(month_key.clone()).or_insert(0.0) += cost;
-        stats.total_cost += cost;
-
-        let entry = TokenStats {
-            in_tokens: tokens_in,
-            out_tokens: tokens_out + tokens_reasoning,
-            cache_read_tokens: cache_read,
-            cache_create_tokens: cache_write,
-        };
-
-        stats.daily_stats.entry(date_key).or_default().add(&entry);
-        stats
-            .monthly_stats
-            .entry(month_key)
-            .or_default()
-            .add(&entry);
-        stats.model_stats.entry(model_name).or_default().add(&entry);
+        record_assistant_message(msg, session_id, time_created, stats, unique_sessions);
     }
 
     true
@@ -479,6 +651,17 @@ fn parse_opencode_connection_with_path(
         .unwrap_or(0);
 
     if let Ok(max_msg_rowid) = max_msg_rowid_res {
+        let latest_time_ms: i64 = if max_msg_rowid > 0 {
+            conn.query_row(
+                "SELECT time_created FROM message WHERE rowid = ?1",
+                [max_msg_rowid],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| Local::now().timestamp_millis())
+        } else {
+            Local::now().timestamp_millis()
+        };
+
         let mut cache_state = match prev {
             Some(p)
                 if max_msg_rowid >= p.checkpoint_msg_rowid
@@ -497,6 +680,9 @@ fn parse_opencode_connection_with_path(
             max_part_rowid,
         );
 
+        let mut in_flight: Vec<InFlightMessage> = Vec::new();
+        resolve_pending_messages(conn, &mut cache_state, &mut in_flight, latest_time_ms);
+
         let target_msg_cp = max_msg_rowid.saturating_sub(MSG_TAIL_WINDOW);
         if target_msg_cp > cache_state.checkpoint_msg_rowid {
             let prev_cp = cache_state.checkpoint_msg_rowid;
@@ -507,8 +693,32 @@ fn parse_opencode_connection_with_path(
                 &mut cache_state.checkpoint_stats,
                 &mut cache_state.checkpoint_sessions,
                 &mut tracker,
+                Some(PendingCheckpointCtx {
+                    pending_rowids: &mut cache_state.pending_msg_rowids,
+                    in_flight: &mut in_flight,
+                    latest_time_ms,
+                }),
             );
             cache_state.checkpoint_msg_rowid = target_msg_cp;
+        }
+
+        while cache_state.pending_msg_rowids.len() > MAX_PENDING_MESSAGES {
+            let Some(evicted_rowid) = cache_state.pending_msg_rowids.pop_first() else {
+                break;
+            };
+            if let Some(pos) = in_flight
+                .iter()
+                .position(|item| item.rowid == evicted_rowid)
+            {
+                let evicted = in_flight.remove(pos);
+                record_assistant_message(
+                    evicted.msg,
+                    evicted.session_id,
+                    evicted.time_created,
+                    &mut cache_state.checkpoint_stats,
+                    &mut cache_state.checkpoint_sessions,
+                );
+            }
         }
 
         let target_part_cp = max_part_rowid.saturating_sub(PART_TAIL_WINDOW);
@@ -527,6 +737,16 @@ fn parse_opencode_connection_with_path(
         let mut live_stats = cache_state.checkpoint_stats.clone();
         let mut live_sessions = cache_state.checkpoint_sessions.clone();
 
+        for item in in_flight {
+            record_assistant_message(
+                item.msg,
+                item.session_id,
+                item.time_created,
+                &mut live_stats,
+                &mut live_sessions,
+            );
+        }
+
         if max_msg_rowid > cache_state.checkpoint_msg_rowid {
             scan_message_range(
                 conn,
@@ -535,6 +755,7 @@ fn parse_opencode_connection_with_path(
                 &mut live_stats,
                 &mut live_sessions,
                 &mut tracker,
+                None,
             );
         }
         live_stats.sessions_found = live_sessions.len();
@@ -576,7 +797,7 @@ fn parse_opencode_connection_with_path(
                 tracker.on_fallback_session();
                 let (
                     model_json,
-                    cost,
+                    raw_cost,
                     tokens_in,
                     tokens_out,
                     tokens_reasoning,
@@ -588,6 +809,15 @@ fn parse_opencode_connection_with_path(
                 stats.sessions_found += 1;
 
                 let model_name = parse_model_id(&model_json);
+                let out_total = tokens_out + tokens_reasoning;
+                let cost = compute_opencode_cost(
+                    Some(raw_cost),
+                    &model_name,
+                    tokens_in,
+                    out_total,
+                    cache_read,
+                    cache_write,
+                );
 
                 let dt = DateTime::from_timestamp(
                     time_created / 1000,
@@ -605,7 +835,7 @@ fn parse_opencode_connection_with_path(
 
                 let entry = TokenStats {
                     in_tokens: tokens_in,
-                    out_tokens: tokens_out + tokens_reasoning,
+                    out_tokens: out_total,
                     cache_read_tokens: cache_read,
                     cache_create_tokens: cache_write,
                 };
@@ -1142,5 +1372,218 @@ mod tests {
 
         assert_eq!(stats.sessions_found, 5);
         assert_eq!(progress.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
+    fn test_opencode_parallel_subagents_inflight_parent_checkpoint_recovery() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, agent TEXT, time_created INTEGER)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, time_created INTEGER)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, data TEXT, time_created INTEGER)",
+            [],
+        )
+        .unwrap();
+
+        let base_ms: i64 = 1794399964978;
+
+        // Parent session + 3 parallel explore subagent child sessions
+        conn.execute(
+            "INSERT INTO session (id, parent_id, agent, time_created) VALUES (?1, NULL, 'build', ?2)",
+            ("ses-parent", base_ms),
+        )
+        .unwrap();
+        for idx in 1..=3 {
+            conn.execute(
+                "INSERT INTO session (id, parent_id, agent, time_created) VALUES (?1, 'ses-parent', 'explore', ?2)",
+                (format!("ses-sub-{}", idx), base_ms + idx * 1000),
+            )
+            .unwrap();
+        }
+
+        // Parent assistant turn starts in-flight (cost=0, tokens=0, time.created set, no completed/finish)
+        let inflight_parent_msg = serde_json::json!({
+            "role": "assistant",
+            "agent": "build",
+            "modelID": "gemini-4-carbon",
+            "providerID": "google",
+            "cost": 0,
+            "tokens": {
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "cache": { "read": 0, "write": 0 }
+            },
+            "time": { "created": base_ms }
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO message (id, session_id, data, time_created) VALUES (?1, ?2, ?3, ?4)",
+            (
+                "msg-parent-inflight",
+                "ses-parent",
+                inflight_parent_msg,
+                base_ms,
+            ),
+        )
+        .unwrap();
+
+        // Insert 90 completed subagent messages (> MSG_TAIL_WINDOW = 64) across the 3 subagents
+        let subagent_turn_cost = 0.05;
+        for i in 1..=90 {
+            let sub_sid = format!("ses-sub-{}", (i % 3) + 1);
+            let ts = base_ms + (i as i64) * 1000;
+            let sub_msg = serde_json::json!({
+                "role": "assistant",
+                "agent": "explore",
+                "modelID": "gemini-4-carbon",
+                "providerID": "google",
+                "cost": subagent_turn_cost,
+                "tokens": {
+                    "input": 10_000,
+                    "output": 500,
+                    "reasoning": 2_500,
+                    "cache": { "read": 0, "write": 0 }
+                },
+                "time": { "created": ts, "completed": ts + 500 },
+                "finish": "tool-calls"
+            })
+            .to_string();
+            conn.execute(
+                "INSERT INTO message (id, session_id, data, time_created) VALUES (?1, ?2, ?3, ?4)",
+                (format!("msg-sub-{}", i), sub_sid, sub_msg, ts),
+            )
+            .unwrap();
+        }
+
+        // 1st incremental scan while parent turn is still waiting on subagents:
+        // checkpoint_msg_rowid advances past rowid 1, but rowid 1 must remain tracked in pending_msg_rowids.
+        let (stats_during, state_during) =
+            parse_opencode_connection_incremental(&conn, None).unwrap();
+        assert!(state_during.checkpoint_msg_rowid > 1);
+        assert!(state_during.pending_msg_rowids.contains(&1));
+        assert_eq!(stats_during.sessions_found, 4);
+        assert!((stats_during.total_cost - 4.50).abs() < 1e-9);
+
+        // Now all subagents finish and OpenCode updates the parent row in-place (no new INSERT needed!)
+        let completed_parent_msg = serde_json::json!({
+            "role": "assistant",
+            "agent": "build",
+            "modelID": "gemini-4-carbon",
+            "providerID": "google",
+            "cost": 0.25,
+            "tokens": {
+                "input": 50_000,
+                "output": 4_000,
+                "reasoning": 11_000,
+                "cache": { "read": 0, "write": 0 }
+            },
+            "time": { "created": base_ms, "completed": base_ms + 120_000 },
+            "finish": "tool-calls"
+        })
+        .to_string();
+        conn.execute(
+            "UPDATE message SET data = ?1 WHERE id = 'msg-parent-inflight'",
+            [completed_parent_msg],
+        )
+        .unwrap();
+
+        // 2nd incremental scan must pick up the updated parent row and clear it from pending_msg_rowids
+        let (stats_after, state_after) =
+            parse_opencode_connection_incremental(&conn, Some(&state_during)).unwrap();
+        assert!(state_after.pending_msg_rowids.is_empty());
+        assert!((stats_after.total_cost - 4.75).abs() < 1e-9);
+
+        // Must match a fresh cold scan identically
+        let stats_cold = parse_opencode_connection(&conn).unwrap();
+        assert!((stats_after.total_cost - stats_cold.total_cost).abs() < 1e-9);
+        assert_eq!(
+            stats_after
+                .model_stats
+                .get("gemini-4-carbon")
+                .unwrap()
+                .in_tokens,
+            stats_cold
+                .model_stats
+                .get("gemini-4-carbon")
+                .unwrap()
+                .in_tokens
+        );
+        assert_eq!(
+            stats_after
+                .model_stats
+                .get("gemini-4-carbon")
+                .unwrap()
+                .out_tokens,
+            stats_cold
+                .model_stats
+                .get("gemini-4-carbon")
+                .unwrap()
+                .out_tokens
+        );
+
+        // 3rd incremental scan must not double-count the finalized parent row
+        let (stats_steady, _) =
+            parse_opencode_connection_incremental(&conn, Some(&state_after)).unwrap();
+        assert!((stats_steady.total_cost - 4.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_opencode_zero_cost_fallback_uses_model_pricing() {
+        use chrono::Datelike;
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, time_created INTEGER)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, data TEXT, time_created INTEGER)",
+            [],
+        )
+        .unwrap();
+
+        let ts: i64 = 1794399964978;
+        // Completed message where OpenCode recorded cost=0 despite non-zero tokens
+        let msg = serde_json::json!({
+            "role": "assistant",
+            "modelID": "gemini-4-carbon",
+            "cost": 0.0,
+            "tokens": {
+                "input": 100_000,
+                "output": 5_000,
+                "reasoning": 5_000,
+                "cache": { "read": 200_000, "write": 0 }
+            },
+            "time": { "created": ts, "completed": ts + 1000 },
+            "finish": "stop"
+        })
+        .to_string();
+
+        conn.execute(
+            "INSERT INTO message (id, session_id, data, time_created) VALUES (?1, ?2, ?3, ?4)",
+            ("m-1", "s-1", msg, ts),
+        )
+        .unwrap();
+
+        let stats = parse_opencode_connection(&conn).unwrap();
+        let now = Local::now();
+        let expected_cost = if now.year() < 2026 || (now.year() == 2026 && now.month() <= 11) {
+            // 0.1M * $2.00 + 0.01M * $10.00 + 0.2M * $0.10 = 0.20 + 0.10 + 0.02 = $0.32
+            0.32
+        } else {
+            // 0.1M * $4.00 + 0.01M * $20.00 + 0.2M * $0.20 = 0.40 + 0.20 + 0.04 = $0.64
+            0.64
+        };
+        assert!((stats.total_cost - expected_cost).abs() < 1e-9);
     }
 }
