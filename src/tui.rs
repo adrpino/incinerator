@@ -1274,8 +1274,12 @@ impl App {
                 || name.contains("mythos")
             {
                 "Claude Code (Anthropic)"
-            } else if name.contains("gemini") || name.contains("argon") {
-                "Gemini CLI (Google)"
+            } else if name.contains("gemini") || name.contains("argon") || name.contains("carbon") {
+                match self.daily_filter {
+                    DailyFilter::Opencode => "Opencode (Google)",
+                    DailyFilter::Antigravity => "Antigravity (Google)",
+                    _ => "Gemini CLI (Google)",
+                }
             } else if name.contains("glm-") || name.contains("z-ai") || name.contains("zai") {
                 "Z.ai (GLM)"
             } else if name.contains("gpt-")
