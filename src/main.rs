@@ -20,7 +20,7 @@ mod zed;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "incinerator")]
+#[command(name = "incinerator", version)]
 #[command(
     about = "🔥 Track how much money you're burning through tokens across Cline, Claude Code, and Gemini CLI",
     long_about = "Incinerator parses your local logs from various AI CLI tools to provide a unified view of token usage and financial costs."
@@ -173,5 +173,20 @@ fn launch_tui() {
     pricing::set_tui_mode(true);
     if let Err(e) = tui::run_tui() {
         eprintln!("Error running TUI: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    #[test]
+    fn test_cli_version_flags() {
+        for flag in &["--version", "-V"] {
+            let err = Cli::try_parse_from(["incinerator", flag]).err().unwrap();
+            assert_eq!(err.kind(), ErrorKind::DisplayVersion);
+            assert!(err.to_string().contains(env!("CARGO_PKG_VERSION")));
+        }
     }
 }
