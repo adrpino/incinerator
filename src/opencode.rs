@@ -1586,4 +1586,46 @@ mod tests {
         };
         assert!((stats.total_cost - expected_cost).abs() < 1e-9);
     }
+
+    #[test]
+    fn test_opencode_zero_cost_fallback_gemini_4_hydrogen() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, time_created INTEGER)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, data TEXT, time_created INTEGER)",
+            [],
+        )
+        .unwrap();
+
+        let ts: i64 = 1794572764978;
+        let msg = serde_json::json!({
+            "role": "assistant",
+            "modelID": "gemini-4-hydrogen",
+            "providerID": "google",
+            "cost": 0.0,
+            "tokens": {
+                "input": 100_000,
+                "output": 5_000,
+                "reasoning": 5_000,
+                "cache": { "read": 200_000, "write": 0 }
+            },
+            "time": { "created": ts, "completed": ts + 1000 },
+            "finish": "stop"
+        })
+        .to_string();
+
+        conn.execute(
+            "INSERT INTO message (id, session_id, data, time_created) VALUES (?1, ?2, ?3, ?4)",
+            ("m-1", "s-1", msg, ts),
+        )
+        .unwrap();
+
+        let stats = parse_opencode_connection(&conn).unwrap();
+        // 0.1M * $1.50 + 0.01M * $7.50 + 0.2M * $0.075 = 0.15 + 0.075 + 0.015 = $0.24
+        assert!((stats.total_cost - 0.24).abs() < 1e-9);
+    }
 }

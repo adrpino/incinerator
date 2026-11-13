@@ -1274,7 +1274,11 @@ impl App {
                 || name.contains("mythos")
             {
                 "Claude Code (Anthropic)"
-            } else if name.contains("gemini") || name.contains("argon") || name.contains("carbon") {
+            } else if name.contains("gemini")
+                || name.contains("argon")
+                || name.contains("carbon")
+                || name.contains("hydrogen")
+            {
                 match self.daily_filter {
                     DailyFilter::Opencode => "Opencode (Google)",
                     DailyFilter::Antigravity => "Antigravity (Google)",
