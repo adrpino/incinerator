@@ -1278,6 +1278,7 @@ impl App {
                 || name.contains("argon")
                 || name.contains("carbon")
                 || name.contains("hydrogen")
+                || name.contains("neon")
             {
                 match self.daily_filter {
                     DailyFilter::Opencode => "Opencode (Google)",
