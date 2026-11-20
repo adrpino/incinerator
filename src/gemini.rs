@@ -828,6 +828,12 @@ mod tests {
         assert_eq!(pricing.cache_read, 0.075);
         assert_eq!(pricing.cache_write, 0.0);
 
+        let pricing = get_gemini_pricing("gemini-4-neon", 300_000);
+        assert_eq!(pricing.input, 3.00);
+        assert_eq!(pricing.output, 15.00);
+        assert_eq!(pricing.cache_read, 0.15);
+        assert_eq!(pricing.cache_write, 0.0);
+
         let pricing = get_gemini_pricing("gemini-3.1-flash-lite-preview", 0);
         assert_eq!(pricing.input, 0.25);
         assert_eq!(pricing.output, 1.50);

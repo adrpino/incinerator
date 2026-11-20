@@ -131,7 +131,9 @@ pub fn get_claude_pricing(model: &str) -> ModelPricing {
 
 pub fn get_gemini_pricing(model: &str, input_count: i64) -> ModelPricing {
     let m = model.to_lowercase();
-    let (input, output, cache) = if m.contains("hydrogen") {
+    let (input, output, cache) = if m.contains("neon") {
+        (3.00, 15.00, 0.15)
+    } else if m.contains("hydrogen") {
         (1.50, 7.50, 0.075)
     } else if m.contains("gemini-4") || m.contains("argon") || m.contains("carbon") {
         let now = chrono::Local::now();
@@ -488,6 +490,7 @@ pub fn get_pricing(model: &str, input_count: i64) -> ModelPricing {
         || m.contains("argon")
         || m.contains("carbon")
         || m.contains("hydrogen")
+        || m.contains("neon")
     {
         get_gemini_pricing(model, input_count)
     } else if m.contains("deepseek") {
@@ -526,6 +529,7 @@ pub fn get_pricing(model: &str, input_count: i64) -> ModelPricing {
             || m.contains("argon")
             || m.contains("carbon")
             || m.contains("hydrogen")
+            || m.contains("neon")
         {
             return p;
         }
@@ -634,6 +638,15 @@ mod tests {
             assert_eq!(p.input, 1.50, "Failed for {}", model);
             assert_eq!(p.output, 7.50, "Failed for {}", model);
             assert_eq!(p.cache_read, 0.075, "Failed for {}", model);
+            assert_eq!(p.cache_write, 0.0, "Failed for {}", model);
+        }
+
+        // Gemini 4 Neon
+        for model in &["gemini-4-neon", "google/gemini-4-neon", "neon"] {
+            let p = get_pricing(model, 300_000);
+            assert_eq!(p.input, 3.00, "Failed for {}", model);
+            assert_eq!(p.output, 15.00, "Failed for {}", model);
+            assert_eq!(p.cache_read, 0.15, "Failed for {}", model);
             assert_eq!(p.cache_write, 0.0, "Failed for {}", model);
         }
 
@@ -1247,6 +1260,9 @@ mod tests {
             get_pricing("gemini-4-hydrogen", 0);
             get_pricing("google/gemini-4-hydrogen", 0);
             get_pricing("hydrogen", 0);
+            get_pricing("gemini-4-neon", 0);
+            get_pricing("google/gemini-4-neon", 0);
+            get_pricing("neon", 0);
             get_pricing("gpt-6-astra", 0);
             get_pricing("gpt-6.1-sol", 0);
             get_pricing("gpt-6-sol", 0);
@@ -1348,6 +1364,20 @@ mod tests {
             assert_eq!(p.input, 1.50, "Failed for {} @ {}", model, ctx);
             assert_eq!(p.output, 7.50, "Failed for {} @ {}", model, ctx);
             assert_eq!(p.cache_read, 0.075, "Failed for {} @ {}", model, ctx);
+            assert_eq!(p.cache_write, 0.0, "Failed for {} @ {}", model, ctx);
+        }
+
+        // Gemini 4 Neon (flat across <=200k and >200k context)
+        for &(model, ctx) in &[
+            ("gemini-4-neon", 0),
+            ("gemini-4-neon", 500_000),
+            ("google/gemini-4-neon", 0),
+            ("neon", 0),
+        ] {
+            let p = get_gemini_pricing(model, ctx);
+            assert_eq!(p.input, 3.00, "Failed for {} @ {}", model, ctx);
+            assert_eq!(p.output, 15.00, "Failed for {} @ {}", model, ctx);
+            assert_eq!(p.cache_read, 0.15, "Failed for {} @ {}", model, ctx);
             assert_eq!(p.cache_write, 0.0, "Failed for {} @ {}", model, ctx);
         }
 
